@@ -45,17 +45,17 @@ DISPLAY = axis
 In this list, the DISPLAY variable will be set to axis because the other one is commented out.
 If someone carelessly edits a list like this and leaves two of the lines uncommented, the first one encountered will be used.
 
-Note that inside a variable's value, the "#" and ";" characters are still comments.
-You should use double or single quoted strings if you need to embed # or ; characters:
+Note that inside a variable's value, the "#" and ";" characters are part of the value:
 
 [source,{ini}]
 ----
-# Below results in INCORRECT=value
-# because comments are stripped
-INCORRECT = value # and a comment
+# Below does not result in INCORRECT=value
+# because comments are not interpreted as comments in values
+INCORRECT = value # and this is not a comment
 
-# Correct embedding
-CORRECT = "value # and an embedded # char"
+# Correct comment
+# hash char # is a comment om this line
+CORRECT = value
 ----
 
 [[sub:ini:sections]]
@@ -119,11 +119,9 @@ ini.2.max_velocity
 A specific variable in a specific sections is often denoted in the documentation as [SECTION]VARIABLE.
 This specification mirrors the same way they are specified in HAL files for expansion.
 
-Variable values may be quoted to ensure proper space and special character embedding in literal or escaped forms.
-Both single and double quoted values are allowed.
-Mutiple quoted value segments are merged into one value.
-Embedding quotes in quoted values must use the backslash \\ character to escape the embedded quote if it is the same kind as the enclosing quotes.
-Double quotes values also support all common escape formats and full Unicode:
+Variable values may embed special characters in literal or escaped forms.
+Single or double quotes are not treated as special and are a literal part of the value.
+Values also support all common escape formats and full Unicode:
 
 * control: \\[abfnrtv]
 * octal: \\[0-2][0-7]{0,2}
@@ -134,27 +132,26 @@ Double quotes values also support all common escape formats and full Unicode:
 The resulting value is always converted into UTF-8 and checked for validity.
 It is not allowed to embed NUL characters either literally or by using an escape.
 
-.Value Quote and Escape Example
+Leading and trailing white space is normally removed from a value.
+You can add leading and trailing space in a value by using an escaped value for space (\\x20) as first or last character.
+Spaces inside a value are automatically part of the value.
+Tabs and newlines can be added using \\t and \\n.
+
+.Value Escape Example
 [source,{ini}]
 ----
-STRING = "Hello World!"
-STRING = 'Hello World Too!'
+STRING = Hello World!
 
 # The following would become: Hello World!
-STRING = "Hello" \
-" " \
-'World' \
-"!"
+STRING = Hello\
+ \
+World\
+!
 
-EMBED = "Literal single ' in double"
-EMBED = 'Literal double " in single'
-EMBED = "Literal double \" in double"
-EMBED = 'Literal single \' in single'
-
-SMILE = "\\370\\237\\230\\200 = 😀"
-SMILE = "\\xf0\\x9f\\x98\\x80 = 😀"
-SMILE = "\\ud83d\\ude00 = 😀"
-SMILE = "\\U0001f600 = 😀"
+SMILE = \\370\\237\\230\\200 = 😀
+SMILE = \\xf0\\x9f\\x98\\x80 = 😀
+SMILE = \\ud83d\\ude00 = 😀
+SMILE = \\U0001f600 = 😀
 ----
 
 Variables' value can have types associated when they are read by LinuxCNC.
@@ -334,9 +331,12 @@ Descriptions of the interfaces are in the Interfaces section of the User Manual.
   The example above will display only one decimal digit.
   Formatting follows Python practice: https://docs.python.org/2/library/string.html#format-specification-mini-language .
   An error will be raised if the format can not accept a floating-point value.
-* `CONE_BASESIZE = .25` - (real) Override the default cone/tool base size of .5 in the graphics display. Valid values are between 0.025 and 2.0.
-* `DISABLE_CONE_SCALING = TRUE` - (bool) Any non-empty value (including "0") will override the default behavior of scaling the cone/tool size using the extents of the currently loaded G-code program in the graphics display.
-* `MAX_FEED_OVERRIDE = 1.2` - (real) The maximum feed override the user may select.
+* `CONE_BASESIZE = .25` - Override the default cone/tool base size of .5 in the graphics display. Valid values are between 0.025 and 2.0.
+* `DISABLE_CONE_SCALING = TRUE` - Any non-empty value (including "0") will override the default behavior of scaling the cone/tool size using the extents of the currently loaded G-code program in the graphics display.
+* `GCODE_VIEW_TOOL_MIN_DIA = 2.0` - If the tool diameter is very small, but non-zero then the displayed cylinder may be too small to see.
+   This could happen if the tool diameter was being used as a wear offset. This setting will cause the tool cone to be displayed
+   rather than a tool cylinder.
+* `MAX_FEED_OVERRIDE = 1.2` - The maximum feed override the user may select.
   1.2 means 120% of the programmed feed rate.
 * `MIN_SPINDLE_OVERRIDE = 0.5` - (real) The minimum spindle override the user may select.
   0.5 means 50% of the programmed spindle speed. (This is used to set the minimum spindle speed.)
