@@ -90,17 +90,27 @@ class Bridge(object):
         self.cycle_start.pinValueChanged.connect(self.pinChanged)
         self.cycle_pause = QHAL.newpin('cycle-pause-in',QHAL.HAL_BIT, QHAL.HAL_IN)
         self.cycle_pause.pinValueChanged.connect(self.pinChanged)
+        self.reload_display = QHAL.newpin('reload-display-in',QHAL.HAL_BIT, QHAL.HAL_IN)
+        self.reload_display.pinValueChanged.connect(self.pinChanged)
+        self.shutdown = QHAL.newpin('shutdown-in',QHAL.HAL_BIT, QHAL.HAL_IN)
+        self.shutdown.pinValueChanged.connect(self.pinChanged)
+        self.ok = QHAL.newpin('ok-in',QHAL.HAL_BIT, QHAL.HAL_IN)
+        self.ok.pinValueChanged.connect(self.pinChanged)
+        self.cancel = QHAL.newpin('cancel-in',QHAL.HAL_BIT, QHAL.HAL_IN)
+        self.cancel.pinValueChanged.connect(self.pinChanged)
 
-        for i in self.INFO.MDI_COMMAND_DICT:
-            LOG.debug('{} {}'.format(i,self.INFO.MDI_COMMAND_DICT.get(i)))
-            self[i] = QHAL.newpin('ini-mdi-cmd-{}'.format(i),QHAL.HAL_BIT, QHAL.HAL_IN)
-            self[i].pinValueChanged.connect(self.runMacroChanged)
+        if not self.INFO.MDI_COMMAND_DICT is None:
+            for i in self.INFO.MDI_COMMAND_DICT:
+                LOG.debug('{} {}'.format(i,self.INFO.MDI_COMMAND_DICT.get(i)))
+                self[i] = QHAL.newpin('ini-mdi-cmd-{}'.format(i),QHAL.HAL_BIT, QHAL.HAL_IN)
+                self[i].pinValueChanged.connect(self.runMacroChanged)
 
-        for i in self.INFO.INI_MACROS:
-            name = i.split()[0]
-            LOG.debug('{} {}'.format(name,i))
-            self[name] = QHAL.newpin('ini-macro-cmd-{}'.format(name),QHAL.HAL_BIT, QHAL.HAL_IN)
-            self[name].pinValueChanged.connect(self.runMacroChanged)
+        if not self.INFO.INI_MACROS is None:
+            for i in self.INFO.INI_MACROS:
+                name = i.split()[0]
+                LOG.debug('{} {}'.format(name,i))
+                self[name] = QHAL.newpin('ini-macro-cmd-{}'.format(name),QHAL.HAL_BIT, QHAL.HAL_IN)
+                self[name].pinValueChanged.connect(self.runMacroChanged)
 
         QHAL.setUpdateRate(100)
         h.ready()
@@ -157,7 +167,7 @@ class Bridge(object):
                 self['Axis{}IsSelected'.format(i.lower())].set(state)
 
     # send msg to hal_glib
-    def writeMsg(self, msg, data):
+    def writeMsg(self, msg, data=''):
         if ZMQ:
             topic = self.writeTopic
             message = json.dumps({'FUNCTION':msg,'ARGS':data})
@@ -201,6 +211,25 @@ class Bridge(object):
        # angular jog rate
         elif self.jogRateAngularIn == pinObject:
                 self.writeMsg('set_jograte_angular', value)
+
+        elif self.reload_display == pinObject:
+            if bool(value):
+                #print('reload')
+                self.writeMsg('request_reload_display', value)
+
+        elif self.shutdown == pinObject:
+            if bool(value):
+                self.writeMsg('request_shutdown')
+
+        elif self.ok == pinObject:
+            if bool(value):
+                self.writeMsg('request_ok', value)
+
+        elif self.cancel == pinObject:
+            if bool(value):
+                self.writeMsg('request_cancel', value)
+
+
 
         # catch all default
         else:

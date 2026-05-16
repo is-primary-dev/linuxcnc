@@ -154,6 +154,8 @@ class HandlerClass:
         STATUS.connect('cycle-start-request', lambda w, state :self.btn_start_clicked(state))
         STATUS.connect('cycle-pause-request', lambda w, state: self.btn_pause_clicked(state))
         STATUS.connect('macro-call-request', lambda w, name: self.request_macro_call(name))
+        STATUS.connect('ok-request', lambda w, state: self.dialog_ext_control(w,1,1))
+        STATUS.connect('cancel-request', lambda w, state: self.dialog_ext_control(w,1,0))
 
         txt1 = _translate("HandlerClass","Setup Tab")
         txt2 = _translate("HandlerClass","If you select a file with .html as a file ending, it will be shown here.")
@@ -335,6 +337,10 @@ class HandlerClass:
         self.w.chk_run_from_line.setChecked(self.w.PREFS_.getpref('Run from line', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_use_virtual.setChecked(self.w.PREFS_.getpref('Use virtual keyboard', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_use_camera.setChecked(self.w.PREFS_.getpref('Use camera', False, bool, 'CUSTOM_FORM_ENTRIES'))
+        self.w.chk_auto_mode_ext_macro.setChecked(self.w.PREFS_.getpref('Auto mode external macro', True, bool, 'CUSTOM_FORM_ENTRIES'))
+        self.w.chk_auto_mode_macro_buttons.setChecked(self.w.PREFS_.getpref('Auto mode macro buttons', True, bool, 'CUSTOM_FORM_ENTRIES'))
+        # make sure the button's property are current
+        self.chk_auto_mode_macro_changed(self.w.chk_auto_mode_macro_buttons.isChecked())
         self.w.chk_alpha_mode.setChecked(self.w.PREFS_.getpref('Use alpha display mode', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_inhibit_selection.setChecked(self.w.PREFS_.getpref('Inhibit display mouse selection', True, bool, 'CUSTOM_FORM_ENTRIES'))
         self.cam_xscale_changed(self.w.PREFS_.getpref('Camview xscale', 100, int, 'CUSTOM_FORM_ENTRIES'))
@@ -345,6 +351,7 @@ class HandlerClass:
 
     def closing_cleanup__(self):
         if not self.w.PREFS_: return
+        LOG.debug("Saving Preferences")
         if self.last_loaded_program is not None:
             self.w.PREFS_.putpref('last_loaded_directory', os.path.dirname(self.last_loaded_program), str, 'BOOK_KEEPING')
             self.w.PREFS_.putpref('last_loaded_file', self.last_loaded_program, str, 'BOOK_KEEPING')
@@ -373,6 +380,9 @@ class HandlerClass:
         self.w.PREFS_.putpref('Run from line', self.w.chk_run_from_line.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Use virtual keyboard', self.w.chk_use_virtual.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Use camera', self.w.chk_use_camera.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Auto mode external macro', self.w.chk_auto_mode_ext_macro.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Auto mode macro buttons', self.w.chk_auto_mode_macro_buttons.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
+
         self.w.PREFS_.putpref('Use alpha display mode', self.w.chk_alpha_mode.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Inhibit display mouse selection', self.w.chk_inhibit_selection.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Camview xscale', self.cam_xscale_percent(), int, 'CUSTOM_FORM_ENTRIES')
@@ -921,7 +931,7 @@ class HandlerClass:
 
     # called from hal_glib to run macros from external event
     def request_macro_call(self, data):
-        if not STATUS.is_mdi_mode():
+        if not self.w.chk_auto_mode_ext_macro.isChecked() and not STATUS.is_mdi_mode():
             self.add_status(_translate("HandlerClass",'Machine must be in MDI mode to run macros'), WARNING)
             return
         if 'ini-macro-cmd' in data:
@@ -1286,6 +1296,14 @@ class HandlerClass:
             self.w.btn_camera.show()
         else:
             self.w.btn_camera.hide()
+
+    def chk_auto_mode_macro_changed(self, state):
+        for b in range(0,10):
+            button = self.w['macrobutton{}'.format(b)]
+            button.setProperty('mdi_mode_check_action',not state)
+
+    def chk_auto_mode_external_macro_changed(self, state):
+        pass
 
     def chk_use_sensor_changed(self, state):
         self.w.btn_tool_sensor.setEnabled(state)
@@ -2077,9 +2095,21 @@ class HandlerClass:
 
     def dialog_ext_control(self, pin, value, answer):
         if value:
-            if not self._dialog_message is None:
-                name = self._dialog_message.get('NAME')
-                STATUS.emit('dialog-update',{'NAME':name,'response':answer})
+            # search for a visible notification first
+            # and close it
+            chk = self.w._NOTICE.find_visible()
+            if not chk is None:
+                chk.close()
+                return
+
+            # search the registered dialogs for a match
+            dlist = self.w.getRegisteredDialogList()
+            for i in (dlist):
+                if i.isVisible():
+                    LOG.verbose('Found dialog',i.objectName())
+                    name = i.getIdName()
+                    STATUS.emit('dialog-update',{'NAME':name,'response':answer})
+                    return
 
     def log_version(self):
         if INFO.RIP_FLAG:
