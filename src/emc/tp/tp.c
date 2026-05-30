@@ -1011,7 +1011,8 @@ STATIC tc_blend_type_t tpChooseBestBlend(TP_STRUCT const * const tp,
 }
 
 
-STATIC tp_err_t tpCreateLineArcBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
+STATIC __attribute__((__noinline__))
+tp_err_t tpCreateLineArcBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
 {
     tp_debug_print("-- Starting LineArc blend arc --\n");
 
@@ -1169,7 +1170,8 @@ STATIC tp_err_t tpCreateLineArcBlend(TP_STRUCT * const tp, TC_STRUCT * const pre
 }
 
 
-STATIC tp_err_t tpCreateArcLineBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
+STATIC __attribute__((__noinline__))
+tp_err_t tpCreateArcLineBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
 {
 
     tp_debug_print("-- Starting ArcLine blend arc --\n");
@@ -1310,7 +1312,8 @@ STATIC tp_err_t tpCreateArcLineBlend(TP_STRUCT * const tp, TC_STRUCT * const pre
     return TP_ERR_OK;
 }
 
-STATIC tp_err_t tpCreateArcArcBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
+STATIC __attribute__((__noinline__))
+tp_err_t tpCreateArcArcBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc, TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
 {
 
     tp_debug_print("-- Starting ArcArc blend arc --\n");
@@ -1479,7 +1482,8 @@ STATIC tp_err_t tpCreateArcArcBlend(TP_STRUCT * const tp, TC_STRUCT * const prev
 }
 
 
-STATIC tp_err_t tpCreateLineLineBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc,
+STATIC __attribute__((__noinline__))
+tp_err_t tpCreateLineLineBlend(TP_STRUCT * const tp, TC_STRUCT * const prev_tc,
         TC_STRUCT * const tc, TC_STRUCT * const blend_tc)
 {
 
@@ -1706,7 +1710,8 @@ STATIC blend_type_t tpCheckBlendArcType(
 
     //If exact stop, we don't compute the arc
     if (prev_tc->term_cond != TC_TERM_COND_PARABOLIC) {
-        tp_debug_print("Wrong term cond = %u\n", prev_tc->term_cond);
+        // term_cond is signed int; use %d (cppcheck invalidPrintfArgType_uint)
+        tp_debug_print("Wrong term cond = %d\n", prev_tc->term_cond);
         return BLEND_NONE;
     }
 
@@ -1721,7 +1726,8 @@ STATIC blend_type_t tpCheckBlendArcType(
         return BLEND_NONE;
     }
 
-    tp_debug_print("Motion types: prev_tc = %u, tc = %u\n",
+    // motion_type is signed int; use %d (cppcheck invalidPrintfArgType_uint)
+    tp_debug_print("Motion types: prev_tc = %d, tc = %d\n",
             prev_tc->motion_type,tc->motion_type);
     //If not linear blends, we can't easily compute an arc
     if ((prev_tc->motion_type == TC_LINEAR) && (tc->motion_type == TC_LINEAR)) {
@@ -2080,7 +2086,8 @@ static bool tpCreateBlendIfPossible(
  * blend arc. Essentially all of the blend arc functions are called through
  * here to isolate the process.
  */
-STATIC tc_blend_type_t tpHandleBlendArc(TP_STRUCT * const tp, TC_STRUCT * const tc) {
+STATIC __attribute__((__noinline__))
+tc_blend_type_t tpHandleBlendArc(TP_STRUCT * const tp, TC_STRUCT * const tc) {
 
     tp_debug_print("*****************************************\n** Handle Blend Arc **\n");
 

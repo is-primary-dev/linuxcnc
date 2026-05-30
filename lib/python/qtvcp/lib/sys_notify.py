@@ -62,6 +62,7 @@ def init(app_name):
     interface = "org.freedesktop.Notifications"
 
     mainloop = None
+    bus = None
     try:
         if DBusQtMainLoop is not None:
             mainloop = DBusQtMainLoop(set_as_default=True)
@@ -76,6 +77,23 @@ def init(app_name):
             DBUS_IFACE.connect_to_signal('NotificationClosed', _onNotificationClosed)
     except Exception as e:
         LOG.warning('Desktop Notify not available:: {}'.format(e))
+        # When the SessionBus is constructed with a PyQt5/PyQt6 mainloop
+        # integration, dbus-python installs a QSocketNotifier on the
+        # connection fd. If the subsequent get_object/Interface setup
+        # raises (e.g. ServiceUnknown when no notification daemon owns
+        # org.freedesktop.Notifications), the Python-side bus reference
+        # is dropped on exception but the QSocketNotifier keeps the
+        # underlying C connection alive in a half-initialized state.
+        # The next QEventLoop tick dispatches a queued message via
+        # dbus_connection_dispatch() and segfaults inside
+        # _dbus_list_unlink. Close the bus explicitly so the notifier
+        # detaches and the connection is fully released.
+        DBUS_IFACE = None
+        if bus is not None:
+            try:
+                bus.close()
+            except Exception:
+                pass
 
 
 def _onActionInvoked(nid, action):
@@ -126,6 +144,7 @@ class Notification(object):
         self.hints = {}  # dict of various display hints
         self.actions = OrderedDict()  # actions names and their callbacks
         self.data = {}  # arbitrary user data
+        self.isVisible = False
 
     def show(self):
         try:
@@ -144,7 +163,7 @@ class Notification(object):
                                     )
 
             self.id = int(nid)
-
+            self.isVisible = True
             NOTIFICATIONS[self.id] = self
             return True
         except Exception as e:
@@ -152,6 +171,7 @@ class Notification(object):
 
     def close(self):
         """Ask the notification server to close the notification"""
+        self.isVisible = False
         try:
             if self.id != 0:
                 DBUS_IFACE.CloseNotification(self.id)
@@ -160,6 +180,7 @@ class Notification(object):
 
     def onClose(self, callback):
         """Set the callback called when the notification is closed"""
+        self.isVisible = False
         self._onNotificationClosed = callback
 
     def setUrgency(self, value):

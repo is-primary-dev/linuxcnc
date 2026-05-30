@@ -377,6 +377,11 @@ void *hal_malloc(long int size)
 	    "HAL: ERROR: hal_malloc called before init\n");
 	return 0;
     }
+    if (size <= 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: hal_malloc bad size: %ld\n", size);
+        return 0;
+    }
+
     /* get the mutex */
     rtapi_mutex_get(&(hal_data->mutex));
     /* allocate memory */
@@ -765,6 +770,20 @@ int hal_pin_new(const char *name, hal_type_t type, hal_pin_dir_t dir,
 	rtapi_print_msg(RTAPI_MSG_ERR,
 	    "HAL: ERROR: component %d not found\n", comp_id);
 	return -EINVAL;
+    }
+    // Already check duplicate before allocating
+    if(halpr_find_pin_by_name(name)) {
+        // Duplicate pin name
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: duplicate pin '%s'\n", name);
+        return -EINVAL;
+    }
+    if(halpr_find_param_by_name(name)) {
+        // Overlapping pin/parameter name
+        // This is a problem because setp does not distinguish and
+        // cannot set pin or param when the names collide.
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: pin '%s' also is the name of a parameter\n", name);
+        // We continue, as was done before...
     }
     /* validate passed in pointer - must point to HAL shmem */
     if (! SHMCHK(data_ptr_addr)) {
@@ -1519,6 +1538,20 @@ int hal_param_new(const char *name, hal_type_t type, hal_param_dir_t dir, void *
 	rtapi_print_msg(RTAPI_MSG_ERR,
 	    "HAL: ERROR: component %d not found\n", comp_id);
 	return -EINVAL;
+    }
+    // Already check duplicate before allocating
+    if(halpr_find_param_by_name(name)) {
+        // Duplicate parameter name
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: duplicate parameter '%s'\n", name);
+        return -EINVAL;
+    }
+    if(halpr_find_pin_by_name(name)) {
+        // Overlapping pin/parameter name
+        // This is a problem because setp does not distinguish and
+        // cannot set pin or param when the names collide.
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: parameter '%s' also is the name of a pin\n", name);
+        // We continue, as was done before...
     }
     /* validate passed in pointer - must point to HAL shmem */
     if (! SHMCHK(data_addr)) {
@@ -2386,6 +2419,119 @@ int hal_add_funct_to_thread(const char *funct_name, const char *thread_name, int
     return 0;
 }
 
+int hal_init_funct_to_thread(const char *funct_name, const char *thread_name, int position)
+{
+    hal_thread_t *thread;
+    hal_funct_t *funct;
+    hal_list_t *list_root, *list_entry;
+    int n;
+    hal_funct_entry_t *funct_entry;
+
+    if (hal_data == 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: init_funct called before init\n");
+        return -EINVAL;
+    }
+
+    if (hal_data->lock & HAL_LOCK_CONFIG) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: init_funct_to_thread called while HAL is locked\n");
+        return -EPERM;
+    }
+
+    if (position == 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: bad position: 0\n");
+        return -EINVAL;
+    }
+
+    if (funct_name == 0 || thread_name == 0) {
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: missing function or thread name\n");
+        return -EINVAL;
+    }
+
+    rtapi_print_msg(RTAPI_MSG_DBG,
+        "HAL: adding init function '%s' to thread '%s'\n",
+        funct_name, thread_name);
+
+    rtapi_mutex_get(&(hal_data->mutex));
+
+    funct = halpr_find_funct_by_name(funct_name);
+    if (funct == 0) {
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: function '%s' not found\n", funct_name);
+        return -EINVAL;
+    }
+
+    thread = halpr_find_thread_by_name(thread_name);
+    if (thread == 0) {
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: thread '%s' not found\n", thread_name);
+        return -EINVAL;
+    }
+
+    /* once the special init cycle has executed, further initf calls are a
+       no-op so config order doesn't depend on whether start_threads has been
+       issued. Surface this with -EALREADY so halcmd can warn loudly. */
+    if (thread->init_done) {
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_WARN,
+            "HAL: WARNING: thread '%s' init cycle already ran; '%s' will not be invoked\n",
+            thread_name, funct_name);
+        return -EALREADY;
+    }
+
+    /* find insertion point in init list (same semantics as
+       hal_add_funct_to_thread: +N from head, -N from tail) */
+    list_root = &(thread->init_funct_list);
+    list_entry = list_root;
+    n = 0;
+    if (position > 0) {
+        while (++n < position) {
+            list_entry = list_next(list_entry);
+            if (list_entry == list_root) {
+                rtapi_mutex_give(&(hal_data->mutex));
+                rtapi_print_msg(RTAPI_MSG_ERR,
+                    "HAL: ERROR: position '%d' is too high\n", position);
+                return -EINVAL;
+            }
+        }
+    } else {
+        while (--n > position) {
+            list_entry = list_prev(list_entry);
+            if (list_entry == list_root) {
+                rtapi_mutex_give(&(hal_data->mutex));
+                rtapi_print_msg(RTAPI_MSG_ERR,
+                    "HAL: ERROR: position '%d' is too low\n", position);
+                return -EINVAL;
+            }
+        }
+        list_entry = list_prev(list_entry);
+    }
+
+    /* allow the same funct to be on funct_list and init_funct_list, and to be
+       referenced multiple times in the init list itself (no users-cap check) */
+    funct_entry = alloc_funct_entry_struct();
+    if (funct_entry == 0) {
+        rtapi_mutex_give(&(hal_data->mutex));
+        rtapi_print_msg(RTAPI_MSG_ERR,
+            "HAL: ERROR: insufficient memory for thread->init function link\n");
+        return -ENOMEM;
+    }
+    funct_entry->funct_ptr = SHMOFF(funct);
+    funct_entry->arg = funct->arg;
+    funct_entry->funct = funct->funct;
+
+    list_add_after((hal_list_t *) funct_entry, list_entry);
+
+    funct->users++;
+
+    rtapi_mutex_give(&(hal_data->mutex));
+    return 0;
+}
+
 int hal_del_funct_from_thread(const char *funct_name, const char *thread_name)
 {
     hal_thread_t *thread;
@@ -3007,7 +3153,36 @@ static void thread_task(void *arg)
 
     thread = arg;
     while (1) {
-	if (hal_data->threads_running > 0) {
+        if (hal_data->threads_running > 0 && !thread->init_done) {
+            /* special init cycle: run init_funct_list once with no
+               timing measurement, re-anchor the period so the long
+               init does not poison maxtime, does not trip the
+               "unexpected realtime delay" catch-up loop, and lands
+               the next wakeup at a clean period boundary (used to
+               keep EtherCAT send clear of SYNC0). The cyclic
+               funct_list is intentionally NOT executed in this
+               cycle -- the next cycle is the first clean cyclic
+               pass. After init_done is latched, drain the list back
+               to the free pool: every entry has already run, the
+               list serves no further purpose, and a halcmd 'initf'
+               arriving later is rejected by the init_done check. */
+            funct_root = (hal_funct_entry_t *) & (thread->init_funct_list);
+            funct_entry = SHMPTR(funct_root->links.next);
+            while (funct_entry != funct_root) {
+                funct_entry->funct(funct_entry->arg, thread->period);
+                funct_entry = SHMPTR(funct_entry->links.next);
+            }
+            rtapi_task_self_resync();
+            thread->init_done = 1;
+            /* drain the list now that the init pass is complete */
+            funct_entry = SHMPTR(funct_root->links.next);
+            while (funct_entry != funct_root) {
+                hal_funct_entry_t *next_entry = SHMPTR(funct_entry->links.next);
+                list_remove_entry((hal_list_t *) funct_entry);
+                free_funct_entry_struct(funct_entry);
+                funct_entry = next_entry;
+            }
+        } else if (hal_data->threads_running > 0) {
 	    /* point at first function on function list */
 	    funct_root = (hal_funct_entry_t *) & (thread->funct_list);
 	    funct_entry = SHMPTR(funct_root->links.next);
@@ -3114,6 +3289,11 @@ static void *shmalloc_up(long int size)
     long int tmp_bot;
     void *retval;
 
+    if (size < 1) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: smalloc_up: attempt to allocate zero or less (size=%ld)\n", size);
+        return NULL;
+    }
+
     /* deal with alignment requirements */
     tmp_bot = hal_data->shmem_bot;
     if (size >= 16) {
@@ -3146,6 +3326,11 @@ static void *shmalloc_dn(long int size)
 {
     long int tmp_top;
     void *retval;
+
+    if (size < 1) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "HAL: ERROR: smalloc_dn: attempt to allocate zero or less (size=%ld)\n", size);
+        return NULL;
+    }
 
     /* tentatively allocate memory */
     tmp_top = hal_data->shmem_top - size;
@@ -3391,6 +3576,8 @@ static hal_thread_t *alloc_thread_struct(void)
 	p->priority = 0;
 	p->task_id = 0;
 	list_init_entry(&(p->funct_list));
+	list_init_entry(&(p->init_funct_list));
+	p->init_done = 0;
 	p->name[0] = '\0';
     }
     return p;
@@ -3637,6 +3824,20 @@ static void free_funct_struct(hal_funct_t * funct)
 		    list_entry = list_next(list_entry);
 		}
 	    }
+	    /* also sweep the init function list so unloaded comps don't
+	       leave dangling init entries that would crash on the next
+	       start_threads */
+	    list_root = &(thread->init_funct_list);
+	    list_entry = list_next(list_root);
+	    while (list_entry != list_root) {
+		funct_entry = (hal_funct_entry_t *) list_entry;
+		if (SHMPTR(funct_entry->funct_ptr) == funct) {
+		    list_entry = list_remove_entry(list_entry);
+		    free_funct_entry_struct(funct_entry);
+		} else {
+		    list_entry = list_next(list_entry);
+		}
+	    }
 	    /* move on to the next thread */
 	    next_thread = thread->next_ptr;
 	}
@@ -3747,9 +3948,11 @@ static void free_thread_struct(hal_thread_t * thread)
 HAL PORT functions
 ******************************************************************************/
 
+#define HAL_PORT_MAGIC_NUM 0x68707274  // Ascii coded 'hprt'
 // This struct is purely local to this file to keep track of the
 // port data in shmem.
 typedef struct __hal_port_shm_t {
+    rtapi_u32 magic;   // Magic marker (to detect *hal_port_t value tampering)
     atomic_uint read;  // offset into buff that outgoing data gets read from
     atomic_uint write; // offset into buff that incoming data gets written to
     unsigned int size; // size of allocated buffer
@@ -3839,7 +4042,7 @@ static bool hal_port_compute_copy(unsigned read,
 
 
 int hal_port_alloc(unsigned size, hal_port_t *port) {
-    if(!port)
+    if(!port || size < 1 || size > HAL_PORT_SIZE_MAX)
         return -EINVAL;
 
     hal_port_shm_t* new_port = shmalloc_up(sizeof(hal_port_shm_t) + size);
@@ -3847,13 +4050,35 @@ int hal_port_alloc(unsigned size, hal_port_t *port) {
     if(!new_port)
         return -ENOMEM;
 
-    memset(new_port, 0, sizeof(hal_port_shm_t));
-    new_port->size = size;
+    new_port->magic = HAL_PORT_MAGIC_NUM;
+    new_port->read  = 0;
+    new_port->write = 0;
+    new_port->size  = size;
 
     *port = SHMOFF(new_port);
     return 0;
 }
 
+static inline hal_port_shm_t *hal_port_to_shm(const hal_port_t *port)
+{
+    hal_port_shm_t *shm;
+    if(!port)
+        return NULL;
+    long ofs = *port;
+    // The offset must be positive non-zero
+    // The offset must be modulo the magic field size (4 bytes)
+    // The offset must not point beyond shared memory for the control structure
+    if(ofs <= 0 || 0 != (ofs & (long)(sizeof(shm->magic)-1)) || ofs > (long)(HAL_SIZE - sizeof(hal_port_shm_t)))
+        return NULL;
+    shm = SHMPTR(ofs);
+    // The magic number must match and size be valid
+    if (shm->magic != HAL_PORT_MAGIC_NUM || shm->size > HAL_PORT_SIZE_MAX)
+        return NULL;
+    // The ofset must not point beyond shared memory considering the size
+    if (ofs > (long)(HAL_SIZE - (sizeof(hal_port_shm_t) + shm->size)))
+        return NULL;
+    return shm;
+}
 
 bool hal_port_read(const hal_port_t *port, char* dest, unsigned count) {
     unsigned read,
@@ -3862,10 +4087,14 @@ bool hal_port_read(const hal_port_t *port, char* dest, unsigned count) {
              beg_bytes_to_read,   //number of bytes to read at beginning of buffer
              final_pos;           //final position after read
 
-    if(!port || !*port || !count) {
+    if(!count) {
         return false;
     } else {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
+        hal_port_shm_t* port_shm = hal_port_to_shm(port);
+        if(!port_shm) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_read: invalid port %p\n", port);
+            return false;
+        }
         hal_port_atomic_load(port_shm, &read, &write);
 
         if(hal_port_compute_copy(read, 
@@ -3894,10 +4123,14 @@ bool hal_port_peek(const hal_port_t *port, char* dest, unsigned count) {
              beg_bytes_to_read,   //number of bytes to read at beginning of buffer
              final_pos;           //final position of read
 
-    if(!port || !*port || !count) {
+    if(!count) {
         return false;
     } else {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
+        hal_port_shm_t* port_shm = hal_port_to_shm(port);
+        if(!port_shm) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_peek: invalid port %p\n", port);
+            return false;
+        }
         hal_port_atomic_load(port_shm, &read, &write);
 
         if(hal_port_compute_copy(read, 
@@ -3925,10 +4158,14 @@ bool hal_port_peek_commit(const hal_port_t *port, unsigned count) {
              beg_bytes_to_read,   //number of bytes to read at beginning of buffer
              final_pos;           //final position of read
 
-    if(!port || !*port || !count) {
+    if(!count) {
         return false;
     } else {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
+        hal_port_shm_t* port_shm = hal_port_to_shm(port);
+        if(!port_shm) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_peek_commit: invalid port %p\n", port);
+            return false;
+        }
         hal_port_atomic_load(port_shm, &read, &write);
 
         if(hal_port_compute_copy(read,
@@ -3957,10 +4194,14 @@ bool hal_port_write(const hal_port_t *port, const char* src, unsigned count) {
              beg_bytes_to_write,
              final_pos;
  
-    if(!port || !*port || !count) {
+    if(!count) {
         return false;
     } else {
-       hal_port_shm_t* port_shm = SHMPTR(*port);
+        hal_port_shm_t* port_shm = hal_port_to_shm(port);
+        if(!port_shm) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_write: invalid port %p\n", port);
+            return false;
+        }
        hal_port_atomic_load(port_shm, &read, &write);
        bytes_avail = hal_port_bytes_writable(read, write, port_shm->size);
 
@@ -4001,42 +4242,44 @@ bool hal_port_write(const hal_port_t *port, const char* src, unsigned count) {
 
 
 unsigned hal_port_readable(const hal_port_t *port) {
-    if(!port || !*port) {
+    hal_port_shm_t* port_shm = hal_port_to_shm(port);
+    if(!port_shm) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_readable: invalid port %p\n", port);
         return 0;
-    } else {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
-        return hal_port_bytes_readable(port_shm->read, port_shm->write, port_shm->size);
     }
+    return hal_port_bytes_readable(port_shm->read, port_shm->write, port_shm->size);
 }
 
 
 unsigned hal_port_writable(const hal_port_t *port) {
-    if(!port || !*port) {
+    hal_port_shm_t* port_shm = hal_port_to_shm(port);
+    if(!port_shm) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_writable: invalid port %p\n", port);
         return 0;
-    } else {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
-        return hal_port_bytes_writable(port_shm->read, port_shm->write, port_shm->size);
     }
+    return hal_port_bytes_writable(port_shm->read, port_shm->write, port_shm->size);
 }
 
 
 unsigned hal_port_buffer_size(const hal_port_t *port) {
-    if(!port || !*port) {
+    hal_port_shm_t* port_shm = hal_port_to_shm(port);
+    if(!port_shm) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_buffer_size: invalid port %p\n", port);
         return 0;
-    } else {
-        return ((hal_port_shm_t*)SHMPTR(*port))->size;
     }
+    return port_shm->size;
 }
 
 
 void hal_port_clear(const hal_port_t *port) {
     unsigned read,write;
-
-    if(port && *port) {
-        hal_port_shm_t* port_shm = SHMPTR(*port);
-        hal_port_atomic_load(port_shm, &read, &write);
-        hal_port_atomic_store_read(port_shm, write);
+    hal_port_shm_t* port_shm = hal_port_to_shm(port);
+    if(!port_shm) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "hal_port_clear: invalid port address %p\n", port);
+        return;
     }
+    hal_port_atomic_load(port_shm, &read, &write);
+    hal_port_atomic_store_read(port_shm, write);
 }
 
 
@@ -4109,6 +4352,7 @@ static int hal_stream_parse_types(hal_type_t type[HAL_STREAM_MAX_PINS], const ch
 
     for(n = 0; n < HAL_STREAM_MAX_PINS && *cfg != '\0'; n++) {
         switch (*cfg) {
+        case 'r': case 'R':
         case 'f': case 'F': type[n] = HAL_FLOAT; break;
         case 'b': case 'B': type[n] = HAL_BIT; break;
         case 'u': case 'U': type[n] = HAL_U32; break;
@@ -4116,7 +4360,7 @@ static int hal_stream_parse_types(hal_type_t type[HAL_STREAM_MAX_PINS], const ch
         case 'l': case 'L': type[n] = HAL_S64; break;
         case 'k': case 'K': type[n] = HAL_U64; break;
         default:
-            rtapi_print_msg(RTAPI_MSG_ERR, "stream: ERROR: unknown type '%c', must be F, B, U, S, L or K\n", *cfg);
+            rtapi_print_msg(RTAPI_MSG_ERR, "stream: ERROR: unknown type '%c', must be R (F), B, U, S, L or K\n", *cfg);
             return 0;
         }
         cfg++;
@@ -4488,6 +4732,7 @@ EXPORT_SYMBOL(hal_export_functf);
 EXPORT_SYMBOL(hal_create_thread);
 
 EXPORT_SYMBOL(hal_add_funct_to_thread);
+EXPORT_SYMBOL(hal_init_funct_to_thread);
 EXPORT_SYMBOL(hal_del_funct_from_thread);
 
 EXPORT_SYMBOL(hal_start_threads);

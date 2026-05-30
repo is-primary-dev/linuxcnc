@@ -137,6 +137,7 @@ class _VCPWindow(QtWidgets.QMainWindow):
         self.originalCloseEvent_ = self.closeEvent
         self._halWidgetList = []
         self._VCPWindowList = []
+        self._DialogList = []
         self.settings = QtCore.QSettings('QtVcp', path.BASENAME)
         log.info('Qsettings file path: yellow<{}>'.format(self.settings.fileName()))
         # make an instance with embedded variables so they
@@ -148,6 +149,12 @@ class _VCPWindow(QtWidgets.QMainWindow):
 
     def getRegisteredHalWidgetList(self):
         return self._halWidgetList
+
+    def registerDialog(self, widget):
+        self._DialogList.append(widget)
+
+    def getRegisteredDialogList(self):
+        return self._DialogList
 
     # These catch events if using a plain VCP panel and there is no handler file
     def keyPressEvent(self, e):
@@ -190,7 +197,9 @@ class _VCPWindow(QtWidgets.QMainWindow):
             except FileNotFoundError:
                 pass
             try:
-                rcc = shutil.which("rcc", path="{}{}{}".format(os.getenv("PATH", ""), os.pathsep, "/usr/lib/qt6/libexec")) or "rcc"
+                rcc = shutil.which("pyside6-rcc")
+                if not rcc:
+                    rcc = shutil.which("rcc", path="{}{}{}".format(os.getenv("PATH", ""), os.pathsep, "/usr/lib/qt6/libexec")) or "rcc"
                 subprocess.call([rcc, "-g", "python", "-o", "{}".format(qrcpy), "{}".format(qrcname)])
                 # rcc generates PySide6 imports; rewrite to use qtpy
                 with open(qrcpy, 'r') as f:

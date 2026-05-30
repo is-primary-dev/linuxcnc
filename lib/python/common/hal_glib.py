@@ -236,12 +236,15 @@ class _GStat(GObject.GObject):
                                         (GObject.TYPE_STRING, GObject.TYPE_BOOLEAN)),
         'show-preference': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, ()),
         'shutdown': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, ()),
+        'shutdown-request': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, ()),
         'status-message': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, (GObject.TYPE_PYOBJECT, GObject.TYPE_PYOBJECT)),
         'error': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, (GObject.TYPE_INT, GObject.TYPE_STRING)),
         'general': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, (GObject.TYPE_PYOBJECT,)),
         'forced-update': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, ()),
         'progress': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE, (GObject.TYPE_INT, GObject.TYPE_PYOBJECT)),
         'following-error': (GObject.SignalFlags.RUN_FIRST , GObject.TYPE_NONE,(GObject.TYPE_PYOBJECT,)),
+        'ok-request': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_BOOLEAN,)),
+        'cancel-request': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_BOOLEAN,)),
         'cycle-start-request': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_BOOLEAN,)),
         'cycle-pause-request': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_BOOLEAN,)),
         'macro-call-request': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_STRING,)),
@@ -406,10 +409,16 @@ class _GStat(GObject.GObject):
             function = y.get('FUNCTION')
             data = y.get('ARGS')
             LOG.debug('REQUESTED:{}'.format(y))
-            try:
-                self[function](data)
-            except Exception as e:
-                LOG.debug('not a valid request\n {}'.format(e))
+            if data == '':
+                try:
+                    self[function]()
+                except Exception as e:
+                    LOG.debug('not a valid request\n {}'.format(e))
+            else:
+                try:
+                    self[function](data)
+                except Exception as e:
+                    LOG.debug('not a valid request\n {}'.format(e))
             #self. action(y.get('MESSAGE'),y.get('ARGS'))
         return True
 
@@ -1459,6 +1468,18 @@ class _GStat(GObject.GObject):
 
     def request_macro_call(self, data):
         self.emit('macro-call-request', data)
+
+    def request_reload_display(self, data):
+        self.emit('reload-display')
+
+    def request_shutdown(self):
+        self.emit('shutdown-request')
+
+    def request_ok(self, data):
+        self.emit('ok-request', data)
+
+    def request_cancel(self, data):
+        self.emit('cancel-request', data)
 
     #############################################
 

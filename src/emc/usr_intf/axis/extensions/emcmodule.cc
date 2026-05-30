@@ -74,7 +74,9 @@ using namespace linuxcnc;
 
 struct pyIniFile {
     PyObject_HEAD
-    std::string inifile;
+    // The 'inifile' member is a pointer because we don't
+    // have C++ constructor semantics here
+    std::string *inifile;
 };
 
 struct pyStatChannel {
@@ -98,12 +100,15 @@ struct pyErrorChannel {
 static PyObject *m = NULL, *error = NULL;
 
 static int Ini_init(pyIniFile *self, PyObject *a, PyObject * /*k*/) {
-    char *inifile;
+    const char *inifile = NULL;
     if(!PyArg_ParseTuple(a, "s", &inifile)) return -1;
 
-    self->inifile = inifile;
+    if(!inifile)
+        return -1;
 
-    IniFile ini(inifile); // Test open (will parse and cache the file)
+    self->inifile = new std::string(inifile);
+
+    IniFile ini(self->inifile); // Test open (will parse and cache the file)
     if (!ini) {
         PyErr_Format( error, "inifile.open(%s) failed", inifile);
         return -1;
@@ -168,7 +173,8 @@ static PyObject *Ini_has_section(pyIniFile *self, PyObject *args)
 
 static PARSE_KW_CONST char kw_empty[] = "";
 static PARSE_KW_CONST char kw_fallback[] = "fallback";
-static PARSE_KW_CONST char *kw_eefn[] = { kw_empty, kw_empty, kw_empty, kw_fallback, NULL };
+static PARSE_KW_CONST char *kw_eeefn[] = { kw_empty, kw_empty, kw_empty, kw_fallback, NULL };
+static PARSE_KW_CONST char *kw_efn[]   = { kw_empty, kw_fallback, NULL };
 
 #undef PARSE_KW_CONST
 
@@ -186,7 +192,7 @@ static PyObject *Ini_get_bool(pyIniFile *self, PyObject *args, PyObject *kwargs)
     const char *sect, *var;
     int num = 1;
     PyObject *def = Py_None;
-    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getbool", kw_eefn, &sect, &var, &num, &def))
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getbool", kw_eeefn, &sect, &var, &num, &def))
         return NULL;
 
     if(num < 1) {
@@ -222,7 +228,7 @@ static PyObject *Ini_get_sint(pyIniFile *self, PyObject *args, PyObject *kwargs)
     const char *sect, *var;
     int num = 1;
     PyObject *def = Py_None;
-    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getsint", kw_eefn, &sect, &var, &num, &def))
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getsint", kw_eeefn, &sect, &var, &num, &def))
         return NULL;
 
     if(num < 1) {
@@ -258,7 +264,7 @@ static PyObject *Ini_get_uint(pyIniFile *self, PyObject *args, PyObject *kwargs)
     const char *sect, *var;
     int num = 1;
     PyObject *def = Py_None;
-    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getuint", kw_eefn, &sect, &var, &num, &def))
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getuint", kw_eeefn, &sect, &var, &num, &def))
         return NULL;
 
     if(num < 1) {
@@ -294,7 +300,7 @@ static PyObject *Ini_get_real(pyIniFile *self, PyObject *args, PyObject *kwargs)
     const char *sect, *var;
     int num = 1;
     PyObject *def = Py_None;
-    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getreal", kw_eefn, &sect, &var, &num, &def))
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getreal", kw_eeefn, &sect, &var, &num, &def))
         return NULL;
 
     if(num < 1) {
@@ -330,7 +336,7 @@ static PyObject *Ini_get_string(pyIniFile *self, PyObject *args, PyObject *kwarg
     const char *sect, *var;
     int num = 1;
     PyObject *def = Py_None;
-    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getstring", kw_eefn, &sect, &var, &num, &def))
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getstring", kw_eeefn, &sect, &var, &num, &def))
         return NULL;
 
     if(num < 1) {
@@ -509,7 +515,188 @@ static PyObject *Ini_lineof(pyIniFile *self, PyObject *args) {
     return result;
 }
 
+//
+// PyFloat|None linuxcnc.ini.maplinearunits(string:enumstr [, fallback=val])
+//
+// Use argument enumstr and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_map_linearunits(pyIniFile * /*self*/, PyObject *args, PyObject *kwargs)
+{
+    const char *str;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "s|$O:maplinearunits", kw_efn, &str, &def))
+        return NULL;
+
+    if(auto v = IniFile::mapLinearUnits(str))
+        return PyFloat_FromDouble(*v);
+
+    // Not found, a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
+//
+// PyFloat|None linuxcnc.ini.mapangularunits(string:enumstr [, fallback=val])
+//
+// Use argument enumstr and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_map_angularunits(pyIniFile * /*self*/, PyObject *args, PyObject *kwargs)
+{
+    const char *str;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "s|$O:mapangularunits", kw_efn, &str, &def))
+        return NULL;
+
+    if(auto v = IniFile::mapAngularUnits(str))
+        return PyFloat_FromDouble(*v);
+
+    // Not found, a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
+//
+// PyFloat|None linuxcnc.ini.mapjointtype(string:enumstr [, fallback=val])
+//
+// Use argument enumstr and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_map_jointtype(pyIniFile * /*self*/, PyObject *args, PyObject *kwargs)
+{
+    const char *str;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "s|$O:mapjointtype", kw_efn, &str, &def))
+        return NULL;
+
+    if(auto v = IniFile::mapJointType(str))
+        return PyLong_FromLong((long)*v);
+
+    // Not found, a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
+//
+// PyFloat|None linuxcnc.ini.getlinearunits(string:section, string:variable [, int:num] [, fallback=val])
+//
+// Find [section]variable and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_get_linearunits(pyIniFile *self, PyObject *args, PyObject *kwargs)
+{
+    const char *sect, *var;
+    int num = 1;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getlinearunits", kw_eeefn, &sect, &var, &num, &def))
+        return NULL;
+
+    if(num < 1) {
+        PyErr_Format(error, "Argument 'num' must be >= 1");
+        return NULL;
+    }
+
+    IniFile ini(self->inifile);
+    if(!ini) {
+        PyErr_Format(error, "Internal: ini-file could not be reopened");
+        return NULL;
+    }
+
+    if(auto v = ini.findLinearUnits(num, var, sect))
+        return PyFloat_FromDouble(*v);
+
+    // Not found or error
+    // We have a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
+//
+// PyFloat|None linuxcnc.ini.getangularunits(string:section, string:variable [, int:num] [, fallback=val])
+//
+// Find [section]variable and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_get_angularunits(pyIniFile *self, PyObject *args, PyObject *kwargs)
+{
+    const char *sect, *var;
+    int num = 1;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getangularunits", kw_eeefn, &sect, &var, &num, &def))
+        return NULL;
+
+    if(num < 1) {
+        PyErr_Format(error, "Argument 'num' must be >= 1");
+        return NULL;
+    }
+
+    IniFile ini(self->inifile);
+    if(!ini) {
+        PyErr_Format(error, "Internal: ini-file could not be reopened");
+        return NULL;
+    }
+
+    if(auto v = ini.findAngularUnits(num, var, sect))
+        return PyFloat_FromDouble(*v);
+
+    // Not found or error
+    // We have a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
+//
+// PyFloat|None linuxcnc.ini.getjointtype(string:section, string:variable [, int:num] [, fallback=val])
+//
+// Find [section]variable and convert the enumeration to its numerical value.
+// The optional named argument fallback= defines the value to return when the
+// variable is not found or invalid. The optional named option num= selects the
+// num'th variable of the section (default to 1).
+//
+static PyObject *Ini_get_jointtype(pyIniFile *self, PyObject *args, PyObject *kwargs)
+{
+    const char *sect, *var;
+    int num = 1;
+    PyObject *def = Py_None;
+    if(!PyArg_ParseTupleAndKeywords(args, kwargs, "ss|i$O:getjointtype", kw_eeefn, &sect, &var, &num, &def))
+        return NULL;
+
+    if(num < 1) {
+        PyErr_Format(error, "Argument 'num' must be >= 1");
+        return NULL;
+    }
+
+    IniFile ini(self->inifile);
+    if(!ini) {
+        PyErr_Format(error, "Internal: ini-file could not be reopened");
+        return NULL;
+    }
+
+    if(auto v = ini.findJointType(num, var, sect))
+        return PyLong_FromLong((long)*v);
+
+    // Not found or error
+    // We have a fallback set by argument or as None
+    Py_INCREF(def);
+    return def;
+}
+
 static void Ini_dealloc(pyIniFile *self) {
+    if(self->inifile) {
+        delete self->inifile;
+        self->inifile = NULL;
+    }
     PyObject_Del(self);
 }
 
@@ -596,6 +783,39 @@ static PyMethodDef Ini_methods[] = {
         "variable in the section. The first matching section variable is "
         "returned if num if not provided. The tuple (None, None) is returned "
         "if the variable is not found." },
+    {"maplinearunits", (PyCFunction)Ini_map_linearunits, METH_VARARGS|METH_KEYWORDS,
+        "PyFloat|None maplinearunits(enumstr [, fallback=])\n"
+        "Take the enumeration string argument and try to convert. "
+        "Returns the value associated with enumerated type defined by "
+        "[mm, metric, in, inch, imperial]." },
+    {"mapangularunits", (PyCFunction)Ini_map_angularunits, METH_VARARGS|METH_KEYWORDS,
+        "PyFloat|None mapangularunits(enumstr [, fallback=])\n"
+        "Take the enumeration string argument and try to convert. "
+        "Returns the value associated with enumerated type defined by "
+        "[deg, degree, grad, gon, rad, radian]." },
+    {"mapjointtype", (PyCFunction)Ini_map_jointtype, METH_VARARGS|METH_KEYWORDS,
+        "PyInt|None mapjointtype(enumstr [, fallback=])\n"
+        "Take the enumeration string argument and try to convert. "
+        "Returns the value associated with enumerated type defined by "
+        "[LINEAR, ANGULAR]." },
+    {"getlinearunits", (PyCFunction)Ini_get_linearunits, METH_VARARGS|METH_KEYWORDS,
+        "PyFloat|None getlinearunits(section, variable [, num] [, fallback=])\n"
+        "Get the ini variable from the section and convert the enumerated type. "
+        "The optional num argument may be used to select the num'th variable of "
+        "that name in the section. Returns the value associated with enumerated "
+        "type defined by [mm, metric, in, inch, imperial]." },
+    {"getangularunits", (PyCFunction)Ini_get_angularunits, METH_VARARGS|METH_KEYWORDS,
+        "PyFloat|None getangularunits(section, variable [, num] [, fallback=])\n"
+        "Get the ini variable from the section and convert the enumerated type. "
+        "The optional num argument may be used to select the num'th variable of "
+        "that name in the section. Returns the value associated with enumerated "
+        "type defined by [deg, degree, grad, gon, rad, radian]." },
+    {"getjointtype", (PyCFunction)Ini_get_jointtype, METH_VARARGS|METH_KEYWORDS,
+        "PyInt|None getjointtype(section, variable [, num] [, fallback=])\n"
+        "Get the ini variable from the section and convert the enumerated type. "
+        "The optional num argument may be used to select the num'th variable of "
+        "that name in the section. Returns the value associated with enumerated "
+        "type defined by [LINEAR, ANGULAR]." },
     {}
 };
 #pragma GCC diagnostic pop
@@ -617,6 +837,12 @@ static const char linuxcncinidoc[] =
     "  PyList(PyTuple(name,value)) getvariables([section])\n"
     "  PyList findall(section [,variable])\n"
     "  PyTuple(filename,lineno) lineof(section, variable [, num])\n"
+    "  PyFloat|None getlinearunits(section, variable [, num] [, fallback=])\n"
+    "  PyFloat|None getangularunits(section, variable [, num] [, fallback=])\n"
+    "  PyInt|None getjointtype(section, variable [, num] [, fallback=])\n"
+    "  PyFloat|None maplinearunits(enumstr [, fallback=])\n"
+    "  PyFloat|None mapangularunits(enumstr [, fallback=])\n"
+    "  PyInt|None mapjointtype(enumstr [, fallback=])\n"
     "\n"
     "Several convenience methods are provided as aliases to above methods:\n"
     "  PyInt|None getint(section, variable [, num] [, fallback=])\n"

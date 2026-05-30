@@ -4,9 +4,6 @@
 [[cha:m-codes]]
 = M-Codes
 
-:ini: {basebackend@docbook:'':ini}
-:hal: {basebackend@docbook:'':hal}
-:ngc: {basebackend@docbook:'':ngc}
 
 == M-Code Quick Reference Table
 
@@ -42,6 +39,7 @@
 == M0, M1 Program Pause
 
 (((M0, M1 Program Pause)))(((M0 Mandatory Program Pause)))(((M1 Optional Program Pause)))
+
 * 'M0' - pause a running program temporarily. LinuxCNC remains in the Auto Mode
   so MDI and other manual actions are not enabled. Pressing the resume
   button will restart the program at the following line.
@@ -60,6 +58,7 @@ to stop after each line of input anyway.
 == M2, M30 Program End
 
 (((M2 Program End)))(((M30 Pallet Exchange and Program End)))
+
 * 'M2' - end the program. Pressing `Cycle Start` ("R" in the Axis GUI)
   will restart the program at the beginning of the file.
 * 'M30' - exchange pallet shuttles and end the program.
@@ -91,6 +90,7 @@ on what using % does not do.
 == M60 Pallet Change Pause
 
 (((M60 Pallet Change Pause)))
+
 * 'M60' - exchange pallet shuttles and then pause a running program
   temporarily (regardless of the setting of the optional stop
   switch). Pressing the cycle start button
@@ -100,6 +100,7 @@ on what using % does not do.
 == M3, M4, M5 Spindle Control
 
 (((M3, M4, M5 Spindle Control)))
+
 * 'M3 [$n]' - start the selected spindle clockwise at the 'S' speed.
 * 'M4 [$n]' - start the selected spindle counterclockwise at the 'S' speed.
 * 'M5 [$n]' - stop the selected spindle.
@@ -111,7 +112,7 @@ Use $-1 to operate on all active spindles.
 This example will start spindles 0, 1, and 2 simultaneously at different
 speeds:
 
-[source,{ngc}]
+[source,ngc]
 ----
 S100 $0
 S200 $1
@@ -122,14 +123,14 @@ M3 $-1
 This example will then reverse spindle 1 but leave the other spindles
 rotating forwards:
 
-[source,{ngc}]
+[source,ngc]
 ----
 M4 $1
 ----
 
 And this will stop spindle 2 and leave the other spindles rotating:
 
-[source,{ngc}]
+[source,ngc]
 ----
 M5 $2
 ----
@@ -199,6 +200,7 @@ ClassicLadder.
 == M7, M8, M9 Coolant Control
 
 (((M7, M8, M9 Coolant Control)))
+
 * 'M7' - turn mist coolant on. M7 controls iocontrol.0.coolant-mist pin.
 * 'M8' - turn flood coolant on. M8 controls iocontrol.0.coolant-flood pin.
 * 'M9' - turn both M7 and M8 off.
@@ -214,7 +216,7 @@ state.
 
 (((M19 Orient Spindle)))
 
-[source,{ngc}]
+[source,ngc]
 ----
 M19 R- Q- [P-] [$-]
 ----
@@ -264,6 +266,7 @@ INI Settings in the [RS274NGC] section:
 == M48, M49 Speed and Feed Override Control
 
 (((M48, M49 Speed and Feed Override Control)))
+
 * 'M48' - enable the spindle speed and feed rate override controls.
 * 'M49' - disable both controls.
 
@@ -281,6 +284,7 @@ see below.
 == M50 Feed Override Control
 
 (((M50 Feed Override Control)))
+
 * 'M50 <P1>' - enable the feed rate override control. The P1
   is optional.
 * 'M50 P0' - disable the feed rate control.
@@ -293,6 +297,7 @@ and the motion will be executed at programmed feed rate.
 == M51 Spindle Speed Override Control
 
 (((M51 Spindle Speed Override)))
+
 * 'M51 <P1> <$->'- enable the spindle speed override control for the
   selected spindle. The  P1 is optional.
 * 'M51 P0 <$->'  - disable the spindle speed override control program.
@@ -306,6 +311,7 @@ exact program specified value of the S-word
 == M52 Adaptive Feed Control
 
 (((M52 Adaptive Feed Control)))
+
 * 'M52 <P1>' - use an adaptive feed. The P1 is optional.
 * 'M52 P0' - stop using adaptive feed.
 
@@ -326,6 +332,7 @@ cutters and wire spark eroders but it is not limited to such applications.
 == M53 Feed Stop Control
 
 (((M53 Feed Stop Control)))
+
 * 'M53 <P1>' - enable the feed stop switch. The P1 is optional.
   Enabling the feed stop switch will allow motion to be
   interrupted by means of the feed stop control. In LinuxCNC,
@@ -338,6 +345,7 @@ cutters and wire spark eroders but it is not limited to such applications.
 == M61 Set Current Tool
 
 (((M61 Set Current Tool)))
+
 * 'M61 Q-' - change the current tool number while in MDI or Manual mode without
   a tool change. One use is when you power up LinuxCNC with a tool
   currently in the spindle you can set that tool number without
@@ -355,6 +363,7 @@ It is an error if:
 == M62 - M65 Digital Output Control
 
 (((M62 - M65 Digital Output Control)))
+
 * 'M62 P-' - turn on digital output synchronized with motion.
 * 'M63 P-' - turn off digital output synchronized with motion.
 * 'M64 P-' - turn on digital output immediately.
@@ -388,7 +397,7 @@ connected in your HAL file to outputs.
 == M66 Wait on Input
 
 (((M66 Wait on Input)))
-[source,{ngc}]
+[source,ngc]
 ----
 M66 P- | E- <L->
 ----
@@ -410,7 +419,7 @@ M66 P- | E- <L->
 
 .M66 Example Lines
 
-[source,{ngc}]
+[source,ngc]
 ----
 M66 P0 L3 Q5 (wait up to 5 seconds for digital input 0 to turn on)
 ----
@@ -440,7 +449,7 @@ net signal-name motion.digital-in-00 <= parport.0.pin10-in
 == M67 Analog Output, Synchronized
 
 (((M67 Analog Output, Synchronized)))
-[source,{ngc}]
+[source,ngc]
 ----
 M67 E- Q-
 ----
@@ -467,7 +476,7 @@ connected in your HAL file to outputs.
 == M68 Analog Output, Immediate
 
 (((M68 Analog Output)))
-[source,{ngc}]
+[source,ngc]
 ----
 M68 E- Q-
 ----
@@ -576,7 +585,7 @@ modal state around a subroutine call using 'M70' and 'M72'. Note that
 the 'imperialsub' subroutine is not "aware" of the M7x features and can be
 used unmodified:
 
-[source,{ngc}]
+[source,ngc]
 ----
 O<showstate> sub
 (DEBUG, imperial=#<_imperial> absolute=#<_absolute> feed=#<_feed> rpm=#<_rpm>)
@@ -629,7 +638,7 @@ against inadvertent modal changes. Note the use of
 <<gcode:predefined-named-parameters,predefined named parameters>> in
 the 'showstate' subroutine.
 
-[source,{ngc}]
+[source,ngc]
 ----
 O<showstate> sub
 (DEBUG, imperial=#<_imperial> absolute=#<_absolute> feed=#<_feed> rpm=#<_rpm>)
@@ -680,7 +689,7 @@ statements. The idea is to remember the modes to be restored at the
 beginning of the subroutine, and restore these before exiting. Here is
 an example, based on snippet of 'nc_files/tool-length-probe.ngc':
 
-[source,{ngc}]
+[source,ngc]
 ----
 O<measure> sub   (measure reference tool)
 ;
@@ -703,7 +712,7 @@ O<measure> endsub
 == M100-M199 User Defined Commands
 
 (((M100-M199 User Defined Commands)))
-[source,{ngc}]
+[source,ngc]
 ----
 M1-- <P- Q->
 ----
@@ -768,7 +777,7 @@ exit 0
 
 To pass a variable to a M1nn file you use the P and Q option like this:
 
-[source,{ngc}]
+[source,ngc]
 ----
 M100 P123.456 Q321.654
 ----

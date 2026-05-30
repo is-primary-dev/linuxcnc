@@ -155,6 +155,8 @@ class HandlerClass:
         STATUS.connect('cycle-start-request', lambda w, state :self.btn_start_clicked(state))
         STATUS.connect('cycle-pause-request', lambda w, state: self.btn_pause_clicked(state))
         STATUS.connect('macro-call-request', lambda w, name: self.request_macro_call(name))
+        STATUS.connect('ok-request', lambda w, state: self.dialog_ext_control(w,1,1))
+        STATUS.connect('cancel-request', lambda w, state: self.dialog_ext_control(w,1,0))
 
         self.swoopPath = os.path.join(paths.IMAGEDIR,'lcnc_swoop.png')
         self.swoopURL = QtCore.QUrl.fromLocalFile(self.swoopPath)
@@ -188,6 +190,9 @@ class HandlerClass:
 
         # override NGCGui path check
         NgcGui.check_linuxcnc_paths_fail = self.check_linuxcnc_paths_fail_override
+
+        # override action class macro run function 
+        ACTION.RUN_MACRO = self.run_macro
 
     def initialized__(self):
         self.init_pins()
@@ -398,6 +403,10 @@ class HandlerClass:
         self.w.chk_use_virtual.setChecked(self.w.PREFS_.getpref('Use virtual keyboard', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_use_tool_sensor.setChecked(self.w.PREFS_.getpref('Use tool sensor', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_use_camera.setChecked(self.w.PREFS_.getpref('Use camera', False, bool, 'CUSTOM_FORM_ENTRIES'))
+        self.w.chk_auto_mode_ext_macro.setChecked(self.w.PREFS_.getpref('Auto mode external macro', True, bool, 'CUSTOM_FORM_ENTRIES'))
+        self.w.chk_auto_mode_macro_buttons.setChecked(self.w.PREFS_.getpref('Auto mode macro buttons', True, bool, 'CUSTOM_FORM_ENTRIES'))
+        # make sure the button's property are current
+        self.chk_auto_mode_macro_changed(self.w.chk_auto_mode_macro_buttons.isChecked())
         self.w.chk_alpha_mode.setChecked(self.w.PREFS_.getpref('Use alpha display mode', False, bool, 'CUSTOM_FORM_ENTRIES'))
         self.w.chk_inhibit_selection.setChecked(self.w.PREFS_.getpref('Inhibit display mouse selection', True, bool, 'CUSTOM_FORM_ENTRIES'))
         self.cam_xscale_changed(self.w.PREFS_.getpref('Camview xscale', 100, int, 'CUSTOM_FORM_ENTRIES'))
@@ -408,6 +417,7 @@ class HandlerClass:
 
     def closing_cleanup__(self):
         if not self.w.PREFS_: return
+        LOG.debug("Saving Preferences")
         if self.last_loaded_program is not None:
             self.w.PREFS_.putpref('last_loaded_directory', os.path.dirname(self.last_loaded_program), str, 'BOOK_KEEPING')
             self.w.PREFS_.putpref('last_loaded_file', self.last_loaded_program, str, 'BOOK_KEEPING')
@@ -435,6 +445,8 @@ class HandlerClass:
         self.w.PREFS_.putpref('Use virtual keyboard', self.w.chk_use_virtual.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Use tool sensor', self.w.chk_use_tool_sensor.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Use camera', self.w.chk_use_camera.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Auto mode external macro', self.w.chk_auto_mode_ext_macro.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Auto mode macro buttons', self.w.chk_auto_mode_macro_buttons.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Use alpha display mode', self.w.chk_alpha_mode.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Inhibit display mouse selection', self.w.chk_inhibit_selection.isChecked(), bool, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Camview xscale', self.cam_xscale_percent(), int, 'CUSTOM_FORM_ENTRIES')
@@ -904,11 +916,19 @@ class HandlerClass:
 
     # called from hal_glib to run macros from external event
     def request_macro_call(self, data):
-        if not STATUS.is_mdi_mode():
+        if not self.w.chk_auto_mode_ext_macro.isChecked() and not STATUS.is_mdi_mode():
             self.add_status(_translate("HandlerClass",'Machine must be in MDI mode to run macros'), WARNING)
             return
+
         if 'ini-macro-cmd' in data:
-            self.add_status(_translate("HandlerClass",'Externally run INI macros not supported yet'), CRITICAL)
+            data = data.replace('ini-macro-cmd-','')
+            try:
+                temp = INFO.MACRO_COMMAND_DICT.get(data).get('cmd')
+                self.run_macro(data=temp)
+                return
+            except:
+                self.add_status(_translate(f"HandlerClass",'External requested INI macro data not recognized:{data}'), CRITICAL)
+
         elif 'ini-mdi-cmd' in data:
             for b in range(0,10):
                 button = self.w['macrobutton{}'.format(b)]
@@ -1239,6 +1259,14 @@ class HandlerClass:
         self.w.btn_ref_camera.setEnabled(state)
         self.w.btn_camera.show() if state else self.w.btn_camera.hide()
 
+    def chk_auto_mode_macro_changed(self, state):
+        for b in range(0,10):
+            button = self.w['macrobutton{}'.format(b)]
+            button.setProperty('mdi_mode_check_action',not state)
+
+    def chk_auto_mode_external_macro_changed(self, state):
+        pass
+
     def chk_use_sensor_changed(self, state):
         self.w.btn_touch_sensor.setEnabled(state)
 
@@ -1440,6 +1468,42 @@ class HandlerClass:
 
         #self.set_statusbar('MPG output Selected: {}'.format(cmd.toolTip()),DEFAULT,noLog=True)
         self._lastSelectButton = button
+
+    # if a macro has been requested, do path checks and run it
+    def run_macro( self, data = None ):
+        o_codes = data.split()
+        command = str( "O<" + o_codes[0] + "> call" )
+
+        # confirm oword path exists
+        rtn = ACTION.check_macro_path(command)
+        if not rtn is True:
+            for i in rtn:
+                self.add_status(i, WARNING)
+            return
+
+        for code in o_codes[1:]:
+            # wait but don't block:
+            parameter, ok = self.w.calculatorDialog_.getValue(f"Enter a value for: {code}:")
+            if not ok:
+                self.add_status('Macro cancelled')
+                return
+            command = command + " [" + str(parameter) + "] "
+
+        # pop a dialog of the properties
+        msg = QtWidgets.QMessageBox()
+        msg.setIcon(QtWidgets.QMessageBox.Information)
+        msg.setText(_translate("HandlerClass",f"Run Macro Command: {command}"))
+        msg.setWindowTitle(_translate("HandlerClass","Confirm To Run Macro Command"))
+        msg.setStandardButtons(QtWidgets.QMessageBox.Ok|QtWidgets.QMessageBox.Cancel)
+        msg.show()
+        retval = msg.exec_()
+        if retval == QtWidgets.QMessageBox.Ok:
+            self.add_status(f'Run Macro Command:{command}')
+            ACTION.SET_GRAPHICS_VIEW('clear')
+            ACTION.CALL_MDI(command)
+            return
+
+        self.add_status('Macro cancelled')
 
     #####################
     # GENERAL FUNCTIONS #
@@ -2088,9 +2152,21 @@ class HandlerClass:
 
     def dialog_ext_control(self, pin, value, answer):
         if value:
-            if not self._dialog_message is None:
-                name = self._dialog_message.get('NAME')
-                STATUS.emit('dialog-update',{'NAME':name,'response':answer})
+            # search for a visible notification first
+            # and close it
+            chk = self.w._NOTICE.find_visible()
+            if not chk is None:
+                chk.close()
+                return
+
+            # search the registered dialogs for a match
+            dlist = self.w.getRegisteredDialogList()
+            for i in (dlist):
+                if i.isVisible():
+                    LOG.verbose('Found dialog',i.objectName())
+                    name = i.getIdName()
+                    STATUS.emit('dialog-update',{'NAME':name,'response':answer})
+                    return
 
     def log_version(self):
         if INFO.RIP_FLAG:
@@ -2123,6 +2199,48 @@ class HandlerClass:
                 flag = False
             except:
                 button.hide()
+
+        # add any INI defined macros if there is less then
+        # ten INI MDI commands
+        start = len(INFO.MDI_COMMAND_DICT)
+        for b in range(start,10):
+            button = self.w['macrobutton{}'.format(b)]
+            adj = b-start
+            # prefer named INI MDI commands
+            try:
+                # find what ini_mdi button we are going to convert
+                key = button.property('ini_mdi_key')
+
+                code = INFO.get_ini_macro_command(key)
+                if code is None:
+                    code = INFO.get_ini_macro_command(b-start)
+                    if code is None:
+                        raise Exception
+                    else: key = b-start
+
+                flag = False
+                button.show()
+
+                try:
+                    label = INFO.get_ini_macro_label(key)
+                    label = label.replace(r'\n', '\n')
+                    button.setText(label)
+                except:
+                    pass
+
+                try:
+                    tooltiplabel = 'INI MACRO CMD {}:\n'.format(key)
+                    tooltiplabel += INFO.get_ini_macro_command(key).replace(';', '\n')
+                    button.setToolTip(tooltiplabel)
+                except Exception as e:
+                    pass
+                button.setProperty('ini_mdi_command_action', False)
+                button.setProperty('ini_macro_command_action', True)
+                button.setProperty('ini_macro_number',b-start)
+                button.setProperty('ini_macro_key',key)
+            except Exception as e:
+                button.hide()
+
         # no buttons hide frame
         if flag:
             self.w.frame_macro_buttons.hide()

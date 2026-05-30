@@ -8,6 +8,10 @@ import hal
 import signal
 import subprocess
 
+
+if '--force_pyqt=6' in sys.argv:
+    os.environ["QT_API"] = "pyqt6"
+
 from optparse import Option, OptionParser
 from qtpy import QtWidgets, QtCore, QtGui
 
@@ -51,6 +55,8 @@ use -g WIDTHxHEIGHT for just setting size or -g +XOFFSET+YOFFSET for just positi
           , Option( '-u', dest='usermod', default="", help='file path of user defined handler file')
           , Option( '-o', dest='useropts', action='append', metavar='USEROPTS', default=[]
                   , help='pass USEROPTS strings to handler under self.w.USEROPTIONS_ list variable')
+          , Option( '--force_pyqt', dest='force_version', default="5"
+                  , help="You can force PyQt version 5 or 6 as available")
           ]
 
 from qtpy.QtCore import QObject, QEvent, Signal
@@ -442,8 +448,19 @@ Pressing cancel will close linuxcnc.""" % target)
                 window.setWindowTitle(INITITLE)
 
         # catch control c and terminate signals
-        signal.signal(signal.SIGTERM, self.shutdown)
-        signal.signal(signal.SIGINT, self.shutdown)
+        # Quit the Qt event loop on the signal so APP.exec() returns and the
+        # shutdown() below runs the normal cleanup once. Calling shutdown()
+        # directly from the handler would clean up but leave the loop running.
+        # Quitting the loop also bypasses the window-close confirmation dialog,
+        # which is correct for a terminate request and leaves that interactive
+        # feature untouched. Qt's C++ event loop does not return to Python often
+        # enough to run Python signal handlers, so a periodic no-op timer yields
+        # to the interpreter to let them fire.
+        signal.signal(signal.SIGTERM, lambda *a: APP.quit())
+        signal.signal(signal.SIGINT, lambda *a: APP.quit())
+        self._signal_timer = QtCore.QTimer()
+        self._signal_timer.timeout.connect(lambda: None)
+        self._signal_timer.start(200)
 
         # check for handler file and if it has 'before_loop' function in
         # ineach screen/embedded panel. (screen should be last)
@@ -517,6 +534,11 @@ Pressing cancel will close linuxcnc.""" % target)
         LOG.debug('Exiting HAL')
         if not HAL is None:
             try:
+                # Stop the QPin polling timer before hal_exit; otherwise its
+                # next tick dereferences pin->u after hal_exit has unmapped
+                # HAL shmem, causing SIGSEGV on glibc 2.39 (Ubuntu 24.04).
+                from qtvcp.qt_halobjects import QPin
+                QPin.update_stop()
                 HAL.exit()
             except Exception as e:
                 print(e)

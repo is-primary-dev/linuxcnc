@@ -799,6 +799,25 @@ extern int hal_thread_delete(const char *name);
 extern int hal_add_funct_to_thread(const char *funct_name, const char *thread_name,
     int position);
 
+/** hal_init_funct_to_thread() registers a function to run exactly once,
+    in the realtime context of 'thread_name', before the thread executes
+    any cyclic (addf-registered) function. The init list is invoked in a
+    dedicated "special cycle" the first time the thread observes
+    threads_running == 1; the cyclic funct list is skipped during that
+    cycle. After the init list returns, the thread's period is re-anchored
+    so the next cyclic cycle wakes one full period later, which both
+    avoids the spurious "unexpected realtime delay" warning that would
+    otherwise follow a long init and gives the cyclic pass a clean
+    starting boundary.
+    'position' uses the same semantics as hal_add_funct_to_thread():
+    positive values count from the start of the init list (+1 runs first),
+    negative values count from the end (-1 runs last); 0 is illegal.
+    Calls made after the init cycle has already run return -EALREADY and
+    have no effect.
+    Returns 0, -EALREADY, or a negative error code. Call only from user
+    space or init code, not from realtime code. */
+extern int hal_init_funct_to_thread(const char *funct_name, const char *thread_name, int position);
+
 /** hal_del_funct_from_thread() removes a function from a thread.
     'funct_name' is the name of the function, as specified in
     a call to hal_export_funct().
@@ -850,6 +869,7 @@ extern int hal_set_constructor(int comp_id, constructor make);
   command.
 */
 
+#define HAL_PORT_SIZE_MAX 65536
 
 /** hal_port_read reads count bytes from the port into dest.
     This function should only be called by the component that owns 
@@ -992,7 +1012,7 @@ extern void hal_stream_wait_writable(hal_stream_t *stream, sig_atomic_t *stop);
 
 /** HAL_STATIC_ASSERT wrapper for compile time asserts
 */
-#if __STDC_VERSION__ >= 202311L || __cplusplus
+#if __STDC_VERSION__ >= 202311L || defined(__cplusplus)
 #define HAL_STATIC_ASSERT(expression, message) static_assert((expression), message)
 #else
 /* _Static_assert: GCC extension, in C standard since C11, deprecated in favour of
@@ -1067,7 +1087,10 @@ static inline rtapi_s64 hal_extend_counter(rtapi_s64 old, rtapi_s64 newlow, int 
     */
 
     /* tripwire if somebody tries to use this code on a Cray with wrong
-       compiler flags */
+       compiler flags. */
+
+    /* prevent cppcheck to complain about the tripwire */
+    /* cppcheck-suppress shiftNegativeLHS */
     HAL_STATIC_ASSERT((-2 >> 1) == -1, 
         "hal_extend_counter impl only works with arithmetic right shift");
 
