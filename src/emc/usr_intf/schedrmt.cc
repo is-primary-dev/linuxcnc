@@ -322,7 +322,7 @@ static int initSockets()
   server_address.sin_addr.s_addr = htonl(INADDR_ANY);
   server_address.sin_port = htons(port);
   server_len = sizeof(server_address);
-  bind(server_sockfd, (struct sockaddr *)&server_address, server_len);
+  bind(server_sockfd, reinterpret_cast<struct sockaddr *>(&server_address), server_len);
   listen(server_sockfd, 5);
   signal(SIGCHLD, SIG_IGN);
   return 0;
@@ -1153,6 +1153,10 @@ void *readClient(void * /*arg*/)
   
 //  res = 1;
   context = (connectionRecType *) malloc(sizeof(connectionRecType));
+  if (!context) {
+    fprintf(stderr, "emcrsh: no memory\n");
+    goto fail;
+  }
   context->cliSock = client_sockfd;
   context->linked = false;
   context->echo = true;
@@ -1196,6 +1200,7 @@ void *readClient(void * /*arg*/)
 finished:
   close(context->cliSock);
   free(context);
+fail:
   pthread_exit((void *)0);
   sessions--;  // FIXME: not reached
 }
@@ -1209,7 +1214,7 @@ int sockMain()
       
       client_len = sizeof(client_address);
       client_sockfd = accept(server_sockfd,
-        (struct sockaddr *)&client_address, &client_len);
+        reinterpret_cast<struct sockaddr *>(&client_address), &client_len);
       if (client_sockfd < 0) exit(0);
       sessions++;
       if ((maxSessions == -1) || (sessions <= maxSessions))
@@ -1236,9 +1241,9 @@ static void initMain()
     emcStatus = 0;
 
     emcErrorBuffer = 0;
-    error_string[LINELEN-1] = 0;
-    operator_text_string[LINELEN-1] = 0;
-    operator_display_string[LINELEN-1] = 0;
+    error_string.clear();
+    operator_text_string.clear();
+    operator_display_string.clear();
     programStartLine = 0;
 }
 
@@ -1258,7 +1263,7 @@ int main(int argc, char *argv[])
         case 'p': sscanf(optarg, "%d", &port); break;
         case 's': sscanf(optarg, "%d", &maxSessions); break;
         case 'w': snprintf(pwd, sizeof(pwd), "%s", optarg); break;
-        case 'd': snprintf(defaultPath, sizeof(defaultPath), "%s", optarg); break;
+        case 'd': defaultPath = optarg; break;
         }
       }
 

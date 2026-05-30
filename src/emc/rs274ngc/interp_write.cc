@@ -226,7 +226,7 @@ int Interp::write_state_tag(block_pointer block,
     bool in_sub = (settings->call_level > 0 && settings->remap_level == 0);
     bool external_sub = strcmp(settings->filename,
 			       settings->sub_context[0].filename);
-    strncpy(state.filename, settings->filename, sizeof(state.filename));
+    rtapi_strxcpy(state.filename, settings->filename);
     state.filename[sizeof(state.filename)-1] = 0;
 
     state.flags[GM_FLAG_IN_REMAP] = in_remap;
@@ -333,6 +333,27 @@ int Interp::write_state_tag(block_pointer block,
 
     state.fields_float[GM_FIELD_FLOAT_FEED] = settings->feed_rate;
     state.fields_float[GM_FIELD_FLOAT_SPEED] = settings->speed[0];
+
+    // Pack new geometric data. block is NULL on the M70 save path
+    // (save_settings() in interp_convert.cc), so guard against null deref.
+    if(nullptr != block){
+        state.fields_float[GM_FIELD_FLOAT_STRAIGHT_HEADING] = block->arc_heading;
+        state.fields_float[GM_FIELD_FLOAT_ARC_RADIUS]       = block->arc_radius;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_X]     = block->arc_center_x;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_Y]     = block->arc_center_y;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_Z]     = block->arc_center_z;
+        state.fields_float[GM_FIELD_FLOAT_NORMAL_HEADING]   = block->normal_heading;
+        state.flags[GM_FLAG_IS_CIRCLE]                      = block->iscircle;
+    }
+    else{
+        state.fields_float[GM_FIELD_FLOAT_STRAIGHT_HEADING] = 0.0;
+        state.fields_float[GM_FIELD_FLOAT_ARC_RADIUS]       = 0.0;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_X]     = 0.0;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_Y]     = 0.0;
+        state.fields_float[GM_FIELD_FLOAT_ARC_CENTER_Z]     = 0.0;
+        state.fields_float[GM_FIELD_FLOAT_NORMAL_HEADING]   = 0.0;
+        state.flags[GM_FLAG_IS_CIRCLE]                      = false;
+    }
 
     return 0;
 }
