@@ -40,6 +40,7 @@ import hal                  # base hal class to react to hal signals
 from common import hal_glib # needed to make our own hal pins
 import sys                 # handle system calls
 import os                  # needed to get the paths and directories
+import signal              # clean shutdown on SIGTERM/SIGINT
 import atexit              # needed to register child's to be closed on closing the GUI
 import subprocess          # to launch onboard and other processes
 import tempfile            # needed only if the user click new in edit mode to open a new empty file
@@ -51,10 +52,22 @@ from time import strftime  # needed for the clock in the GUI
 
 # Throws up a dialog with debug info when an error is encountered
 def excepthook(exc_type, exc_obj, exc_tb):
+    # A KeyboardInterrupt reaching the excepthook is a termination request:
+    # either SIGINT, or SIGTERM surfaced into the main loop by PyGObject's
+    # signal bridge. Quit cleanly instead of popping a modal error dialog,
+    # which would block in a nested loop and leave gmoccapy running until the
+    # caller escalates to SIGKILL.
+    if issubclass(exc_type, KeyboardInterrupt):
+        LOG.info("gmoccapy interrupted (signal), shutting down")
+        if Gtk.main_level() > 0:
+            Gtk.main_quit()
+        else:
+            # No loop yet (startup): the interrupt is swallowed at the GTK
+            # C boundary, so returning resumes startup. Force the exit.
+            os._exit(0)
+        return
     try:
         w = app.widgets.window1
-    except KeyboardInterrupt:
-        sys.exit()
     except NameError:
         w = None
     lines = traceback.format_exception(exc_type, exc_obj, exc_tb)
@@ -6583,6 +6596,18 @@ if __name__ == "__main__":
                     LOG.error('postgui command error:{}'.format(res))
                     raise SystemExit(res)
 
+
+    # Exit on SIGTERM/SIGINT whether or not a main loop is running.
+    # Gtk.main_quit() does nothing outside a running loop, so quit the
+    # loop if one is active, otherwise exit the process.
+    def _terminate(signum, frame):
+        LOG.info("gmoccapy received signal {}, shutting down".format(signum))
+        if Gtk.main_level() > 0:
+            Gtk.main_quit()
+        else:
+            sys.exit(0)
+    signal.signal(signal.SIGTERM, _terminate)
+    signal.signal(signal.SIGINT, _terminate)
 
     # start the event loop
     Gtk.main()

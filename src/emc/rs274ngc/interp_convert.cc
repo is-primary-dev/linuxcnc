@@ -5150,65 +5150,73 @@ int Interp::convert_stop(block_pointer block,    //!< pointer to a block of RS27
     PROGRAM_STOP();
   } else if (block->m_modes[4] == 1) {
     OPTIONAL_PROGRAM_STOP();
-  } else if (block->m_modes[4] == 99 && _setup.loop_on_main_m99) {
+  } else if (block->m_modes[4] == 99 && _setup.loop_on_main_m99 &&
+             settings->file_pointer != NULL) {
 
     // Fanuc-style M99 main program endless loop
+    // Only loops when running from a file; in MDI there is no file to
+    // seek back to, so M99 falls through to the M2/M30 program-end path
+    // below (avoids a fseek(NULL) segfault).
     logDebug("M99 main program endless loop");
 
     loop_to_beginning(settings);  // return control to beginning of file
     FINISH();  // Output any final linked segments
     return INTERP_EXECUTE_FINISH;  // tell task to issue any queued commands
   } else if ((block->m_modes[4] == 2) || (block->m_modes[4] == 30) ||
-            (block->m_modes[4] == 99 && !_setup.loop_on_main_m99)
+            (block->m_modes[4] == 99 &&
+             (!_setup.loop_on_main_m99 || settings->file_pointer == NULL))
             ) {   /* reset stuff here */
 
 /*1*/
-    rotate(&settings->current_x, &settings->current_y, settings->rotation_xy);
-    settings->current_x += settings->origin_offset_x;
-    settings->current_y += settings->origin_offset_y;
-    settings->current_z += settings->origin_offset_z;
-    settings->AA_current += settings->AA_origin_offset;
-    settings->BB_current += settings->BB_origin_offset;
-    settings->CC_current += settings->CC_origin_offset;
-    settings->u_current += settings->u_origin_offset;
-    settings->v_current += settings->v_origin_offset;
-    settings->w_current += settings->w_origin_offset;
 
-    settings->origin_index = 1;
-    settings->parameters[5220] = 1.0;
-    settings->origin_offset_x = USER_TO_PROGRAM_LEN(settings->parameters[5221]);
-    settings->origin_offset_y = USER_TO_PROGRAM_LEN(settings->parameters[5222]);
-    settings->origin_offset_z = USER_TO_PROGRAM_LEN(settings->parameters[5223]);
-    settings->AA_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5224]);
-    settings->BB_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5225]);
-    settings->CC_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5226]);
-    settings->u_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5227]);
-    settings->v_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5228]);
-    settings->w_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5229]);
-    settings->rotation_xy = settings->parameters[5230];
+    if (!settings->disable_auto_g54) {
+        rotate(&settings->current_x, &settings->current_y, settings->rotation_xy);
+        settings->current_x += settings->origin_offset_x;
+        settings->current_y += settings->origin_offset_y;
+        settings->current_z += settings->origin_offset_z;
+        settings->AA_current += settings->AA_origin_offset;
+        settings->BB_current += settings->BB_origin_offset;
+        settings->CC_current += settings->CC_origin_offset;
+        settings->u_current += settings->u_origin_offset;
+        settings->v_current += settings->v_origin_offset;
+        settings->w_current += settings->w_origin_offset;
 
-    settings->current_x -= settings->origin_offset_x;
-    settings->current_y -= settings->origin_offset_y;
-    settings->current_z -= settings->origin_offset_z;
-    settings->AA_current -= settings->AA_origin_offset;
-    settings->BB_current -= settings->BB_origin_offset;
-    settings->CC_current -= settings->CC_origin_offset;
-    settings->u_current -= settings->u_origin_offset;
-    settings->v_current -= settings->v_origin_offset;
-    settings->w_current -= settings->w_origin_offset;
-    rotate(&settings->current_x, &settings->current_y, -settings->rotation_xy);
+        settings->origin_index = 1;
+        settings->parameters[5220] = 1.0;
+        settings->origin_offset_x = USER_TO_PROGRAM_LEN(settings->parameters[5221]);
+        settings->origin_offset_y = USER_TO_PROGRAM_LEN(settings->parameters[5222]);
+        settings->origin_offset_z = USER_TO_PROGRAM_LEN(settings->parameters[5223]);
+        settings->AA_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5224]);
+        settings->BB_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5225]);
+        settings->CC_origin_offset = USER_TO_PROGRAM_ANG(settings->parameters[5226]);
+        settings->u_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5227]);
+        settings->v_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5228]);
+        settings->w_origin_offset = USER_TO_PROGRAM_LEN(settings->parameters[5229]);
+        settings->rotation_xy = settings->parameters[5230];
 
-    SET_G5X_OFFSET(settings->origin_index,
-                   settings->origin_offset_x,
-                   settings->origin_offset_y,
-                   settings->origin_offset_z,
-                   settings->AA_origin_offset,
-                   settings->BB_origin_offset,
-                   settings->CC_origin_offset,
-                   settings->u_origin_offset,
-                   settings->v_origin_offset,
-                   settings->w_origin_offset);
-    SET_XY_ROTATION(settings->rotation_xy);
+        settings->current_x -= settings->origin_offset_x;
+        settings->current_y -= settings->origin_offset_y;
+        settings->current_z -= settings->origin_offset_z;
+        settings->AA_current -= settings->AA_origin_offset;
+        settings->BB_current -= settings->BB_origin_offset;
+        settings->CC_current -= settings->CC_origin_offset;
+        settings->u_current -= settings->u_origin_offset;
+        settings->v_current -= settings->v_origin_offset;
+        settings->w_current -= settings->w_origin_offset;
+        rotate(&settings->current_x, &settings->current_y, -settings->rotation_xy);
+
+        SET_G5X_OFFSET(settings->origin_index,
+                       settings->origin_offset_x,
+                       settings->origin_offset_y,
+                       settings->origin_offset_z,
+                       settings->AA_origin_offset,
+                       settings->BB_origin_offset,
+                       settings->CC_origin_offset,
+                       settings->u_origin_offset,
+                       settings->v_origin_offset,
+                       settings->w_origin_offset);
+        SET_XY_ROTATION(settings->rotation_xy);
+    }
 
 /*2*/ if (settings->plane != CANON_PLANE::XY) {
       SELECT_PLANE(CANON_PLANE::XY);
