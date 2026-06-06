@@ -425,7 +425,7 @@ This widget allows a user to *set a HAL pin true or false* with the push of a bu
 
 As an option it can be a _toggle button_.
 
-For  a _LED Indicator Option_, see <<sub:qtvcp:widgets:indicatedpushbutton>>[IndicatedPushButton] below for more info.
+For  a _LED Indicator Option_, see <<sub:qtvcp:widgets:indicatedpushbutton,IndicatedPushButton>> below for more info.
 
 It also has other options.
 
@@ -649,7 +649,7 @@ MDI_COMMAND_MACRO1 = G53 G0 Z0;G53 G0 X0 Y0, Goto\nMachn\nZero
 
 //FIXME add link to Indicated_PushButton section
 Action buttons are subclassed from
-<<sub:qtvcp:widgets:indicatedpushbutton>>[`IndicatedPushButton`].
+<<sub:qtvcp:widgets:indicatedpushbutton,`IndicatedPushButton`>>.
 See the following sections for more information about:
 
 * <<sub:qtvcp:widgets:indicatedpushbutton:led,LED Indicator option>>
@@ -1537,7 +1537,7 @@ Enter any of these _case sensitive_ commands to load the respective program or a
 *`CLEAR HISTORY`*::
   _Clears the MDI History_.
 *`net`*::
-  See link:../man/man1/halcmd.1.html#COMMANDS[`halcmd net` commands]. +
+  See link:../man/man1/halcmd.1.html#_commands[`halcmd net` commands]. +
   An error will result if the command is unsuccessful.
   * _Syntax_: `net <signal name> <pin name>`
   * __Example__: `net plasmac:jog-inhibit motion.jog-stop`
