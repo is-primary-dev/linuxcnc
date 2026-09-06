@@ -169,14 +169,21 @@ PYTARGETS :=
 GENERATED_MANPAGES :=
 
 # Submakefiles from each of these directories will be included if they exist
+ifeq ($(BUILD_GUI),yes)
+GUI_SUBDIRS := emc/usr_intf/touchy emc/usr_intf/stepconf emc/usr_intf/pncconf \
+    emc/usr_intf/gremlin emc/usr_intf/gscreen emc/usr_intf/pyui emc/usr_intf/qtvcp \
+    emc/usr_intf/gmoccapy emc/usr_intf/qtplasmac emc/usr_intf/mdro
+endif
+
 SUBDIRS := \
-    libnml/linklist libnml/cms libnml/rcs libnml/os_intf \
-    libnml/nml libnml/buffer libnml/posemath libnml \
+    libposemath \
+    \
+    libnml \
     \
     rtapi/examples/timer rtapi/examples/semaphore rtapi/examples/shmem \
     rtapi/examples/extint rtapi/examples/fifo rtapi/examples rtapi \
     \
-    hal/components hal/drivers hal/drivers/mesa-hostmot2 \
+    hal/components hal/drivers \
     hal/user_comps/devices hal/user_comps/mb2hal \
     hal/user_comps hal/user_comps/vismach hal/user_comps/vfs11_vfd hal/classicladder hal/utils hal \
     hal/user_comps/vfdb_vfd hal/user_comps/wj200_vfd \
@@ -184,11 +191,9 @@ SUBDIRS := \
     hal/user_comps/huanyang-vfd \
 	hal/user_comps/xhc-whb04b-6 \
     \
-    emc/usr_intf/axis emc/usr_intf/touchy emc/usr_intf/stepconf emc/usr_intf/pncconf \
-    emc/usr_intf/gremlin emc/usr_intf/gscreen emc/usr_intf/pyui emc/usr_intf/qtvcp \
-    emc/usr_intf/gmoccapy emc/usr_intf/qtplasmac emc/usr_intf/mdro\
-    emc/usr_intf emc/nml_intf emc/task emc/kinematics emc/tp emc/canterp \
-    emc/motion emc/ini emc/rs274ngc emc/sai emc/pythonplugin \
+    $(GUI_SUBDIRS) \
+    emc/usr_intf/axis emc/usr_intf emc/nml_intf emc/task emc/kinematics emc/canterp \
+    emc/ini emc/rs274ngc emc/sai emc/pythonplugin \
     emc/motion-logger \
     emc/tooldata \
     emc \
@@ -357,6 +362,7 @@ INFILES = \
 	../tcl/linuxcnc.tcl ../scripts/halrun ../scripts/rip-environment \
 	../scripts/linuxcncmkdesktop \
 	../lib/python/nf.py \
+	../lib/python/lcnc_realtime.py \
 	../share/desktop-directories/linuxcnc-doc.directory \
 	../share/desktop-directories/linuxcnc-ref.directory \
 	../share/desktop-directories/linuxcnc-cnc.directory \
@@ -396,16 +402,15 @@ SRCHEADERS := \
     hal/drivers/mesa-hostmot2/hostmot2-serial.h \
     emc/linuxcnc.h \
     emc/kinematics/kinematics.h \
-    emc/motion/emcmotcfg.h \
+    emc/nml_intf/emcmotcfg.h \
     emc/ini/inifile.hh \
     emc/ini/inifile.h \
     emc/nml_intf/emcpos.h \
-    emc/nml_intf/emcpose.h \
     emc/nml_intf/motion_types.h \
-    libnml/posemath/gomath.h \
-    libnml/posemath/gotypes.h \
-    libnml/posemath/posemath.h \
-    libnml/posemath/sincos.h \
+    libposemath/emcpose.h \
+    libposemath/posemath.h \
+    libposemath/posemath.hh \
+    libposemath/posemath_types.h \
     rtapi/rtapi.h \
     rtapi/rtapi_app.h \
     rtapi/rtapi_atomic.h \
@@ -431,9 +436,16 @@ SRCHEADERS := \
     rtapi/rtapi_string.h \
     rtapi/rtapi_vsnprintf.h
 
-# the "headers" target installs all the header files in ../include
+# the "headers" target installs all the header files in ../include.  One rule
+# does the copying for every entry in SRCHEADERS, so a directory that exports a
+# header does not carry a recipe of its own.  Two headers sharing a basename
+# would collide here, and make says so rather than letting one cp win.
 .PHONY: headers
-HEADERS := $(patsubst %,../include/%,$(foreach h,$(SRCHEADERS),$(notdir $h)))
+HEADERS := $(patsubst %,../include/%,$(notdir $(SRCHEADERS)))
+$(foreach h,$(SRCHEADERS),$(eval ../include/$(notdir $(h)): $(h)))
+$(HEADERS):
+	$(ECHO) Exporting $(notdir $@)
+	$(Q)cp $< $@
 headers: $(HEADERS)
 
 # install header files as part of the build
@@ -481,7 +493,9 @@ TARGETS += ../bin/gremlin_view
 	$(Q)chmod +x $@
 
 # halshow as standalone app:
+ifeq ($(BUILD_GUI),yes)
 TARGETS += ../bin/halshow
+endif
 ../bin/halshow: Makefile
 	$(Q)rm -f $@
 	$(Q)(echo "#!$(TCLSH)")>|$@
@@ -499,8 +513,10 @@ python: $(PYTARGETS)
 userspace: python
 inclean:
 	$(RM) $(INFILES)
+# Not just $(HEADERS): a header that has been dropped from SRCHEADERS still has
+# a copy sitting in ../include, and that copy is what an angled include finds.
 headersclean:
-	$(RM) $(HEADERS)
+	$(RM) ../include/*.h ../include/*.hh
 clean: docclean pythonclean cscopeclean headersclean
 distclean: clean inclean
 
@@ -534,6 +550,7 @@ genclean:
 	find . -name '*.o' |xargs rm -f
 	-rm -rf objects
 	-rm -f $(TARGETS)
+	-rm -f ../lib/*.so.[0-9]*
 	-rm -f $(GENERATED_MANPAGES)
 	-rm -f ../rtlib/*.$(MODULE_EXT)
 	-rm -f hal/components/conv_*.comp
@@ -592,14 +609,6 @@ ifeq ($(BUILD_SYS),uspace)
 else
 	@echo "setcap target is only supported for uspace builds" >&2; exit 1
 endif
-
-# These rules allows a header file from this directory to be installed into
-# ../include.  A pair of rules like these will exist in the Submakefile
-# of each file that contains headers.
-#$(patsubst %,../include/%,$(wildcard *.h)): ../include/%.h: %.h
-#	$(Q)-cp $^ $@
-#$(patsubst %,../include/%,$(wildcard *.hh)): ../include/%.hh: %.hh
-#	$(Q)-cp $^ $@
 
 INSTALL=install -o root
 DIR=$(INSTALL) -d -m 0755
@@ -679,10 +688,14 @@ install-dirs:
 		$(DESTDIR)$(datadir)/linuxcnc/hallib
 
 install-kernel-indep: install-dirs
-	$(FILE) ../docs/man/man1/*.1 $(DESTDIR)$(mandir)/man1
-	$(FILE) $(wildcard ../docs/man/man3/*.3) $(DESTDIR)$(mandir)/man3
-	$(FILE) $(wildcard ../docs/man/man9/*.9) $(DESTDIR)$(mandir)/man9
+ifeq ($(BUILD_MANPAGES),yes)
+	$(FILE) $(wildcard ../docs/build/man/man1/*.1) $(DESTDIR)$(mandir)/man1
+	$(FILE) $(wildcard ../docs/build/man/man3/*.3) $(DESTDIR)$(mandir)/man3
+	$(FILE) $(wildcard ../docs/build/man/man9/*.9) $(DESTDIR)$(mandir)/man9
+endif
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) objects/*.msg $(DESTDIR)$(tcldir)/msgs
+endif
 	$(EXE) ../scripts/realtime $(DESTDIR)$(prefix)/lib/linuxcnc
 	$(EXE) ../scripts/halrun $(DESTDIR)$(bindir)
 	$(EXE) ../scripts/halcmd_twopass $(DESTDIR)$(bindir)
@@ -691,7 +704,9 @@ install-kernel-indep: install-dirs
 	$(EXE) ../scripts/sim_pin $(DESTDIR)$(bindir)
 	$(FILE) ../*.png ../*.gif $(DESTDIR)$(datadir)/linuxcnc
 	$(FILE) ../lib/hallib/*   $(DESTDIR)$(datadir)/linuxcnc/hallib
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../tcl/*.png $(DESTDIR)$(tcldir)
+endif
 
 	# install all the sample configs, including subdirs (tar is required on debian systems, and common on others)
 	$(DIR) $(DESTDIR)$(sampleconfsdir)
@@ -722,15 +737,18 @@ install-kernel-indep: install-dirs
 	$(FILE) $(HEADERS) $(DESTDIR)$(includedir)/linuxcnc/
 	$(TREE) $(NC_FILES) $(DESTDIR)$(ncfilesdir)
 	$(EXE) ../nc_files/M101 $(DESTDIR)$(ncfilesdir)
-	$(FILE) ../tcl/TkLinuxCNC $(DESTDIR)/etc/X11/app-defaults
 	$(FILE) Makefile.modinc $(DESTDIR)$(datadir)/linuxcnc
+ifeq ($(BUILD_GUI),yes)
 	$(EXE) $(TCL) $(DESTDIR)$(tcldir)
+	$(FILE) ../tcl/TkLinuxCNC $(DESTDIR)/etc/X11/app-defaults
 	$(FILE) ../tcl/hal.so $(DESTDIR)$(tcldir)
 	$(FILE) ../tcl/linuxcnc.so $(DESTDIR)$(tcldir)
 	$(FILE) ../tcl/pkgIndex.tcl $(DESTDIR)$(tcldir)
 	$(EXE) $(TCL_BIN) $(DESTDIR)$(tcldir)/bin
 	$(FILE) ../tcl/scripts/balloon.tcl ../tcl/scripts/emchelp.tcl $(DESTDIR)$(tcldir)/scripts
 	$(EXE) ../tcl/scripts/Set_Coordinates.tcl $(DESTDIR)$(tcldir)/scripts
+endif
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../share/linuxcnc/*.glade $(DESTDIR)$(prefix)/share/linuxcnc
 	$(FILE) ../share/linuxcnc/stepconf/*.glade $(DESTDIR)$(prefix)/share/linuxcnc/stepconf
 	$(FILE) ../share/linuxcnc/touchy.glade $(DESTDIR)$(prefix)/share/linuxcnc
@@ -740,22 +758,28 @@ install-kernel-indep: install-dirs
 	$(FILE) ../share/linuxcnc/pncconf/*.glade $(DESTDIR)$(prefix)/share/linuxcnc/pncconf
 	$(FILE) ../share/linuxcnc/gremlin_view.ui $(DESTDIR)$(prefix)/share/linuxcnc
 	$(FILE) ../share/linuxcnc/popupkeyboard.ui $(DESTDIR)$(prefix)/share/linuxcnc
+endif
 	$(FILE) ../configs/common/linuxcnc.nml     $(DESTDIR)$(prefix)/share/linuxcnc
 	$(FILE) ../configs/common/linuxcnc_big.nml $(DESTDIR)$(prefix)/share/linuxcnc
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../src/emc/usr_intf/pncconf/pncconf-help/*.txt $(DESTDIR)$(prefix)/share/linuxcnc/pncconf/pncconf-help
 	$(FILE) ../src/emc/usr_intf/pncconf/pncconf-help/*.png $(DESTDIR)$(prefix)/share/linuxcnc/pncconf/pncconf-help
+	$(TREE) ../share/linuxcnc/mtconnect $(DESTDIR)$(prefix)/share/linuxcnc
 
 	$(FILE) ../lib/python/gladevcp/hal_python.xml $(DESTDIR)$(datadir)/glade/catalogs/
 	$(FILE) ../share/glade/pixmaps/hicolor/22x22/actions/widget*.png  $(DESTDIR)$(datadir)/glade/pixmaps/hicolor/22x22/actions/
 
 	$(FILE) ../share/gtksourceview-4/language-specs/*.lang  $(DESTDIR)$(datadir)/gtksourceview-4/language-specs/
+endif
 
 	$(FILE) ../src/hal/drivers/mesa-hostmot2/modbus/*.tmpl  $(DESTDIR)$(prefix)/share/linuxcnc/
 
 install-kernel-indep: install-python
 install-python: install-dirs
 	$(DIR) $(DESTDIR)$(SITEPY) $(DESTDIR)$(SITEPY)/rs274
+	$(DIR) $(DESTDIR)$(SITEPY)/mtc
 	$(DIR) $(DESTDIR)$(SITEPY)/common
+ifeq ($(BUILD_GUI),yes)
 	$(DIR) $(DESTDIR)$(SITEPY)/touchy
 	$(DIR) $(DESTDIR)$(SITEPY)/gscreen
 	$(DIR) $(DESTDIR)$(SITEPY)/qtvcp
@@ -777,9 +801,12 @@ install-python: install-dirs
 	$(DIR) $(DESTDIR)$(SITEPY)/pncconf
 	$(DIR) $(DESTDIR)$(SITEPY)/pyui
 	$(DIR) $(DESTDIR)$(SITEPY)/plasmac
+endif
 	$(FILE) ../lib/python/*.py ../lib/python/*.so $(DESTDIR)$(SITEPY)
 	$(FILE) ../lib/python/common/*.py $(DESTDIR)$(SITEPY)/common
 	$(FILE) ../lib/python/rs274/*.py $(DESTDIR)$(SITEPY)/rs274
+	$(FILE) ../lib/python/mtc/*.py $(DESTDIR)$(SITEPY)/mtc
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../lib/python/touchy/*.py $(DESTDIR)$(SITEPY)/touchy
 	$(FILE) ../lib/python/gscreen/*.py $(DESTDIR)$(SITEPY)/gscreen
 	$(FILE) ../lib/python/qtvcp/*.{py,ui,txt} $(DESTDIR)$(SITEPY)/qtvcp
@@ -797,21 +824,24 @@ install-python: install-dirs
 	$(EXE) ../bin/stepconf $(DESTDIR)$(bindir)
 	$(EXE) ../bin/pncconf $(DESTDIR)$(bindir)
 	$(EXE) ../bin/pyui $(DESTDIR)$(bindir)
+endif
 	$(EXE) ../bin/hal_input $(DESTDIR)$(bindir)
 	$(EXE) ../bin/hal_bridge $(DESTDIR)$(bindir)
 	$(EXE) ../bin/mitsub_vfd $(DESTDIR)$(bindir)
 	$(EXE) ../bin/mqtt-publisher $(DESTDIR)$(bindir)
+	$(EXE) ../bin/mtconnect-agent $(DESTDIR)$(bindir)
 	$(EXE) ../bin/z_level_compensation $(DESTDIR)$(bindir)
 	$(EXE) ../bin/pmx485 $(DESTDIR)$(bindir)
 	$(EXE) ../bin/sim-torch $(DESTDIR)$(bindir)
-	$(EXE) ../bin/pyvcp $(DESTDIR)$(bindir)
-	$(EXE) ../bin/gladevcp $(DESTDIR)$(bindir)
-	$(EXE) ../bin/axis $(DESTDIR)$(bindir)
-	$(EXE) ../bin/axis-remote $(DESTDIR)$(bindir)
 	$(EXE) ../bin/debuglevel $(DESTDIR)$(bindir)
 	$(EXE) ../bin/linuxcnctop $(DESTDIR)$(bindir)
 	$(EXE) ../bin/mdi $(DESTDIR)$(bindir)
+ifeq ($(BUILD_GUI),yes)
 	$(EXE) ../bin/hal_manualtoolchange $(DESTDIR)$(bindir)
+	$(EXE) ../bin/axis-remote $(DESTDIR)$(bindir)
+	$(EXE) ../bin/pyvcp $(DESTDIR)$(bindir)
+	$(EXE) ../bin/gladevcp $(DESTDIR)$(bindir)
+	$(EXE) ../bin/axis $(DESTDIR)$(bindir)
 	$(EXE) ../bin/image-to-gcode $(DESTDIR)$(bindir)
 	$(EXE) ../bin/touchy $(DESTDIR)$(bindir)
 	$(EXE) ../bin/gscreen $(DESTDIR)$(bindir)
@@ -819,12 +849,14 @@ install-python: install-dirs
 	$(EXE) ../lib/python/qtvcp/designer/install_script $(DESTDIR)$(SITEPY)/qtvcp/designer/
 	$(EXE) ../bin/gmoccapy $(DESTDIR)$(bindir)
 	$(EXE) ../bin/teach-in $(DESTDIR)$(bindir)
-	$(EXE) ../bin/scorbot-er-3 $(DESTDIR)$(bindir)
 	$(EXE) $(patsubst %.py,../bin/%,$(VISMACH_PY)) $(DESTDIR)$(bindir)
 	$(EXE) $(patsubst %.py,../bin/%,$(QTPLASMAC_PY)) $(DESTDIR)$(bindir)
 	$(FILE) ../share/linuxcnc/linuxcnc-wizard.gif $(DESTDIR)$(prefix)/share/linuxcnc
 	$(FILE) ../share/axis/images/*.{png,gif,xbm,ngc} $(DESTDIR)$(datadir)/axis/images
 	$(FILE) ../share/axis/tcl/*.tcl $(DESTDIR)$(datadir)/axis/tcl
+endif
+	$(EXE) ../bin/scorbot-er-3 $(DESTDIR)$(bindir)
+ifeq ($(BUILD_GUI),yes)
 	$(FILE) ../share/gscreen/images/*.gif $(DESTDIR)$(datadir)/gscreen/images
 	$(TREE) ../share/gscreen/skins/* $(DESTDIR)$(datadir)/gscreen/skins
 	$(TREE) ../share/qtvcp/images/* $(DESTDIR)$(datadir)/qtvcp/images
@@ -832,6 +864,7 @@ install-python: install-dirs
 	$(TREE) ../share/qtvcp/panels/* $(DESTDIR)$(datadir)/qtvcp/panels
 	$(TREE) ../share/qtvcp/widgets_ui/* $(DESTDIR)$(datadir)/qtvcp/widgets_ui
 	$(TREE) ../share/gmoccapy/icons/* $(DESTDIR)$(datadir)/gmoccapy/icons
+endif
 
 install-kernel-dep:
 	$(DIR)	$(DESTDIR)$(moduledir)/linuxcnc \
@@ -1047,7 +1080,11 @@ hm2_pci-objs  :=			  \
     $(MATHSTUB)
 hm2_eth-objs  :=			  \
     hal/drivers/mesa-hostmot2/hm2_eth.o   \
-    $(MATHSTUB)
+    hal/drivers/mesa-hostmot2/hm2_eth_net_posix.o
+ifeq ($(CONFIG_USPACE_XENOMAI_EVL),y)
+hm2_eth-objs  += hal/drivers/mesa-hostmot2/hm2_eth_net_evl.o
+endif
+hm2_eth-objs  += $(MATHSTUB)
 hm2_spi-objs  :=			  \
     hal/drivers/mesa-hostmot2/hm2_spi.o   \
     hal/drivers/mesa-hostmot2/llio_info.o \
@@ -1117,13 +1154,13 @@ lineardeltakins-objs := emc/kinematics/lineardeltakins.o
 
 obj-m += pentakins.o
 pentakins-objs := emc/kinematics/pentakins.o
-pentakins-objs += libnml/posemath/_posemath.o
-pentakins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+pentakins-objs += libposemath/_posemath.o
+pentakins-objs += $(MATHSTUB)
 
 obj-m += rotarydeltakins.o
 rotarydeltakins-objs := emc/kinematics/rotarydeltakins.o
-rotarydeltakins-objs += libnml/posemath/_posemath.o
-rotarydeltakins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+rotarydeltakins-objs += libposemath/_posemath.o
+rotarydeltakins-objs += $(MATHSTUB)
 
 obj-m += rosekins.o
 rosekins-objs := emc/kinematics/rosekins.o
@@ -1149,8 +1186,8 @@ endif
 # SWITCHKINS
 obj-m += genhexkins.o
 genhexkins-objs := emc/kinematics/genhexkins.o
-genhexkins-objs += libnml/posemath/_posemath.o
-genhexkins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+genhexkins-objs += libposemath/_posemath.o
+genhexkins-objs += $(MATHSTUB)
 genhexkins-objs += emc/kinematics/kins_util.o
 genhexkins-objs += emc/kinematics/switchkins.o
 genhexkins-objs += $(USERKFUNCS)
@@ -1158,8 +1195,8 @@ genhexkins-objs += $(USERKFUNCS)
 obj-m += genserkins.o
 genserkins-objs := emc/kinematics/genserkins.o
 genserkins-objs += emc/kinematics/genserfuncs.o
-genserkins-objs += libnml/posemath/gomath.o
-genserkins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+genserkins-objs += libposemath/gomath.o
+genserkins-objs += $(MATHSTUB)
 genserkins-objs += emc/kinematics/kins_util.o
 genserkins-objs += emc/kinematics/switchkins.o
 genserkins-objs += $(USERKFUNCS)
@@ -1180,24 +1217,32 @@ xyzbc-trt-kins-objs += $(USERKFUNCS)
 
 obj-m += scarakins.o
 scarakins-objs := emc/kinematics/scarakins.o
-scarakins-objs += libnml/posemath/_posemath.o
-scarakins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+scarakins-objs += libposemath/_posemath.o
+scarakins-objs += $(MATHSTUB)
 scarakins-objs += emc/kinematics/kins_util.o
 scarakins-objs += emc/kinematics/switchkins.o
 scarakins-objs += $(USERKFUNCS)
 
 obj-m += pumakins.o
 pumakins-objs := emc/kinematics/pumakins.o
-pumakins-objs += libnml/posemath/_posemath.o
-pumakins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+pumakins-objs += libposemath/_posemath.o
+pumakins-objs += $(MATHSTUB)
 pumakins-objs += emc/kinematics/kins_util.o
 pumakins-objs += emc/kinematics/switchkins.o
 pumakins-objs += $(USERKFUNCS)
 
+obj-m += three21kins.o
+three21kins-objs := emc/kinematics/three21kins.o
+three21kins-objs += libposemath/_posemath.o
+three21kins-objs += $(MATHSTUB)
+three21kins-objs += emc/kinematics/kins_util.o
+three21kins-objs += emc/kinematics/switchkins.o
+three21kins-objs += $(USERKFUNCS)
+
 obj-m += 5axiskins.o
 5axiskins-objs := emc/kinematics/5axiskins.o
-5axiskins-objs += libnml/posemath/_posemath.o
-5axiskins-objs += libnml/posemath/sincos.o $(MATHSTUB)
+5axiskins-objs += libposemath/_posemath.o
+5axiskins-objs += $(MATHSTUB)
 5axiskins-objs += emc/kinematics/kins_util.o
 5axiskins-objs += emc/kinematics/switchkins.o
 5axiskins-objs += $(USERKFUNCS)
@@ -1246,8 +1291,8 @@ tpmod-objs += emc/tp/tcq.o
 tpmod-objs += emc/tp/tp.o
 tpmod-objs += emc/tp/spherical_arc.o
 tpmod-objs += emc/tp/blendmath.o
-tpmod-objs += emc/nml_intf/emcpose.o
-tpmod-objs += libnml/posemath/_posemath.o
+tpmod-objs += libposemath/emcpose.o
+tpmod-objs += libposemath/_posemath.o
 tpmod-objs += emc/tp/sp_scurve.o
 tpmod-objs += emc/tp/ruckig_wrapper.o
 tpmod-objs += emc/tp/cruckig/block.o
@@ -1269,7 +1314,7 @@ tpmod-objs += emc/tp/cruckig/velocity_second_step1.o
 tpmod-objs += emc/tp/cruckig/velocity_second_step2.o
 tpmod-objs += emc/tp/cruckig/velocity_third_step1.o
 tpmod-objs += emc/tp/cruckig/velocity_third_step2.o
-tpmod-objs += libnml/posemath/sincos.o $(MATHSTUB)
+tpmod-objs += $(MATHSTUB)
 
 TORTOBJS = $(foreach file,$($(patsubst %.o,%,$(1))-objs), objects/rt$(file))
 ifeq ($(BUILD_SYS),uspace)
@@ -1284,7 +1329,7 @@ modules: $(patsubst %.o,../rtlib/%.so,$(obj-m))
 	$(Q)objdump -w -j .rtapi_export -t objects/$*.tmp \
 	| awk 'BEGIN{print "{ global :"} /rtapi_exported_/{printf("%s;\n", substr($$6,16))} END{print "local : * ; };"}' \
 	> objects/$*.ver
-	$(Q)$(CC) -shared -Bsymbolic -Wl,--version-script,objects/$*.ver -o $@ $^ -lm $(LDFLAGS)
+	$(Q)$(CC) -shared -Bsymbolic -Wl,--version-script,objects/$*.ver -o $@ $^ -lm $(XENOMAI_EVL_LDFLAGS) $(LDFLAGS)
 	$(Q)chmod -x $@
 
 RTFLAGS += -fno-strict-aliasing -fwrapv
@@ -1295,7 +1340,7 @@ $(sort $(filter-out objects/rtemc/tp/cruckig/%,$(RTOBJS))) : objects/rt%.o : %.c
 	@rm -f $@
 	@mkdir -p $(dir $@)
 	$(Q)$(CC) -c $(OPT) $(DEBUG) $(EXTRA_DEBUG) -DRTAPI \
-		$(EXTRA_CFLAGS) \
+		$(EXTRA_CFLAGS) $(XENOMAI_EVL_CFLAGS) \
 		-MP -MD -MF "${@:.o=.d}" -MT "$@" \
 		$< -o $@
 
@@ -1413,6 +1458,7 @@ endif
 ../rtlib/xyzbc-trt-kins$(MODULE_EXT): $(addprefix objects/rt,$(xyzbc-trt-kins-objs))
 ../rtlib/scarakins$(MODULE_EXT):      $(addprefix objects/rt,$(scarakins-objs))
 ../rtlib/pumakins$(MODULE_EXT):       $(addprefix objects/rt,$(pumakins-objs))
+../rtlib/three21kins$(MODULE_EXT):     $(addprefix objects/rt,$(three21kins-objs))
 #----------------------------------------------------------------
 
 ifeq ($(TRIVIAL_BUILD),no)
@@ -1461,7 +1507,7 @@ swish:
 		$(dir $(BASEPWD))scripts \
 		$(dir $(BASEPWD))configs \
 		$(dir $(BASEPWD))docs/src \
-		$(dir $(BASEPWD))docs/man/man1
+		$(dir $(BASEPWD))docs/build/man/man1
 
 # When you depend on objects/var-ZZZ you are depending on the contents of the
 # variable ZZZ, which is assumed to depend on a Makefile, a Submakefile, or

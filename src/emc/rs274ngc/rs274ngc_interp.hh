@@ -16,6 +16,7 @@
 
 #ifndef RS274NGC_INTERP_H
 #define RS274NGC_INTERP_H
+#include <stdio.h>		// FILE
 #include "rs274ngc.hh"
 #include "interp_internal.hh"
 #include "nml_intf/interp_return.hh"
@@ -259,7 +260,9 @@ public:
                                 setup_pointer settings);
  int convert_param_comment(char *comment, char *expanded, int len);
     int convert_comment(char *comment, bool enqueue = true);
- int convert_control_mode(int g_code, double tolerance, double naivecam_tolerance, setup_pointer settings);
+ int convert_control_mode(int g_code, double tolerance, double naivecam_tolerance,
+                          double r_word, bool r_present, /* G64_R_PLANNER */
+                          setup_pointer settings);
  int convert_adaptive_mode(int g_code, setup_pointer settings);
 
  int convert_coordinate_system(int g_code, setup_pointer settings);
@@ -360,7 +363,7 @@ public:
  int cycle_traverse(block_pointer block, CANON_PLANE plane, double end1, double end2,
                           double end3);
  int enhance_block(block_pointer block, setup_pointer settings);
- int _execute(const char *command = 0);
+ int _execute(const char *command = NULL);
  int execute_binary(double *left, int operation, double *right);
  int execute_binary1(double *left, int operation, double *right);
  int execute_binary2(double *left, int operation, double *right);
@@ -474,7 +477,8 @@ int read_dollar(char *line, int *counter, block_pointer block,
  int gen_settings(
      int *int_current, int *int_saved,
      double *float_current, double *float_saved,
-     std::string &cmd);
+     std::string &cmd,
+     bool include_spindle_speed);
  int gen_m_codes(int *current, int *saved, std::string &cmd);
     int gen_restore_cmd(int *current_g,
 			int *current_m,
@@ -522,6 +526,7 @@ int read_dollar(char *line, int *counter, block_pointer block,
  int read_z(char *line, int *counter, block_pointer block,
                   double *parameters);
  int refresh_actual_position(setup_pointer settings);
+ void get_abs_position(setup_pointer settings, double abs_pos[9]);
  void rotate(double *x, double *y, double t);
  int set_probe_data(setup_pointer settings);
  int write_g_codes(block_pointer block, setup_pointer settings);

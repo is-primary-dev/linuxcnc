@@ -1,4 +1,4 @@
-VERSION = '016.085'
+VERSION = '016.087'
 LCNCVER = '2.10'
 
 '''
@@ -28,14 +28,13 @@ from shutil import copy as COPY
 from subprocess import Popen, PIPE
 from subprocess import run as RUN
 from subprocess import call as CALL
-from importlib import reload, util
+from importlib import reload
 import time
 import tarfile
 import math
 import glob
 import linuxcnc
 import hal
-from OpenGL.GL import glTranslatef
 from qtpy import QtCore, QtWidgets, QtGui
 from qtpy.QtCore import *
 from qtpy.QtWidgets import *
@@ -475,6 +474,7 @@ class HandlerClass:
         STATUS.connect('periodic', lambda w: self.update_periodic())
         STATUS.connect('metric-mode-changed', self.metric_mode_changed)
         STATUS.connect('motion-type-changed', lambda w, data: self.motion_type_changed(data))
+        STATUS.connect('reload-display', lambda w: self.g10_reload())
         self.startupTimer = QTimer()
         self.startupTimer.timeout.connect(self.startup_timeout)
         self.startupTimer.setSingleShot(True)
@@ -2124,7 +2124,7 @@ class HandlerClass:
         yTableCenter = (self.yMin + self.yLen / 2) / mult - mid[1]
         xSize = self.xLen / mult / zoomScale
         ySize = self.yLen / mult / zoomScale
-        glTranslatef(-xTableCenter, -yTableCenter, 0)
+        widget.translate_modelview(-xTableCenter, -yTableCenter, 0)
         widget.set_eyepoint_from_extents(xSize, ySize)
         widget.perspective = False
         widget.lat = widget.lon = 0
@@ -2335,6 +2335,10 @@ class HandlerClass:
             for pin in ['pierce-type', 'pierce-motion-delay', 'cut-height-delay', 'pierce-end-height',
                         'gouge-speed', 'gouge-speed-distance', 'creep-speed', 'creep-speed-distance']:
                 hal.set_p(f'plasmac.{pin}', '0')
+
+    def g10_reload(self):
+        if self.fileOpened:
+            self.file_reload_clicked()
 
     def file_reload_clicked(self):
         proceed = self.editor_close_check()

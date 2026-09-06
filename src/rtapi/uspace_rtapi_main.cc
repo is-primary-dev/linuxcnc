@@ -16,7 +16,6 @@
  */
 
 #include "config.h"
-#include <linuxcnc.h>
 
 #ifdef __linux__
 #include <sys/fsuid.h>
@@ -38,6 +37,7 @@
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <grp.h>
 #ifdef HAVE_SYS_IO_H
 #include <sys/io.h>
 #endif
@@ -56,11 +56,344 @@
 #include <boost/lockfree/queue.hpp>
 
 #include "rtapi.h"
-#include <hal.h>
-#include "hal/hal_priv.h"
 #include "uspace_common.h"
 
 static RtapiApp &App();
+
+//Indicates if this instance is a master
+static bool is_master = false;
+
+#ifdef __linux__
+// detect_preempt_rt() inspects uname for the PREEMPT_RT marker.  Used only
+// for diagnostic warning at startup; callers must not gate behavior on
+// the kernel string, since SCHED_FIFO on a PREEMPT_DYNAMIC kernel is still
+// useful (better than SCHED_OTHER, worse than PREEMPT_RT).
+static bool detect_preempt_rt() {
+    struct utsname u;
+    if(uname(&u) < 0) return 0;
+    return strcasestr(u.version, "PREEMPT RT") != NULL
+        || strcasestr(u.version, "PREEMPT_RT") != NULL;
+}
+#else
+static bool detect_preempt_rt() {
+    return false;
+}
+#endif
+
+#ifdef __linux__
+// detect_preempt_dynamic() inspects uname for the PREEMPT_DYNAMIC marker.
+static bool detect_preempt_dynamic() {
+    struct utsname u;
+    if(uname(&u) < 0) return false;
+    return strcasestr(u.version, "PREEMPT DYNAMIC") != NULL
+        || strcasestr(u.version, "PREEMPT_DYNAMIC") != NULL;
+}
+#else
+static bool detect_preempt_dynamic() {
+    return false;
+}
+#endif
+
+#if defined(USPACE_RTAI) || defined(USPACE_XENOMAI) || defined(USPACE_XENOMAI_EVL)
+static bool has_setuid_root() {
+    return geteuid() == 0;
+}
+#endif
+
+#if defined(USPACE_XENOMAI) || defined(USPACE_XENOMAI_EVL)
+static bool is_current_user_in_gid(gid_t target_gid) {
+    int ngroups = getgroups(0, NULL);
+    if (ngroups < 0) {
+        perror("getgroups size failed");
+        return false;
+    }
+
+    gid_t *groups = (gid_t *)malloc(ngroups * sizeof(gid_t));
+    if (groups == NULL) {
+        perror("malloc failed");
+        return false;
+    }
+
+    ngroups = getgroups(ngroups, groups);
+    if (ngroups < 0) {
+        perror("getgroups get failed");
+        free(groups);
+        return false;
+    }
+
+    bool found = false;
+    for (int i = 0; i < ngroups; i++) {
+        if (groups[i] == target_gid) {
+            found = true;
+            break;
+        }
+    }
+
+    free(groups);
+    return found;
+}
+#endif
+
+#ifdef USPACE_RTAI
+// FIXME: detect_rtai_lxrt relays on setuid root
+static bool detect_rtai_lxrt() {
+    if(!has_setuid_root()) return false;
+    struct utsname u;
+    uname(&u);
+    return strcasestr (u.release, "-rtai") != NULL;
+}
+#else
+static bool detect_rtai_lxrt() {
+    return false;
+}
+#endif
+#ifdef USPACE_XENOMAI
+static bool detect_xenomai() {
+    //Running xenomai has /proc/xenomai
+    struct stat sb;
+    if (stat("/proc/xenomai", &sb) != 0) {
+        //No xenomai
+        return false;
+    }
+
+    if (has_setuid_root()) {
+        //xenomai and setuid, all fine
+        return true;
+    }
+
+    //Get allowed xenomai group
+    //Set to xenomai by /etc/init.d/xenomai from libxenomai1 debian package
+    int gid = 0;
+    FILE *fp = fopen("/sys/module/xenomai/parameters/allowed_group", "r");
+    if (fp == NULL) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: detect_xenomai fopen failed: %m\n");
+        return false;
+    }
+
+    int ret = fscanf(fp, "%i", &gid);
+    if (ret != 1) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: detect_xenomai fscanf failed: %m\n");
+        fclose(fp);
+        return false;
+    }
+    fclose(fp);
+
+    if (gid == 0) {
+        if(is_master){
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "Warning: Xenomai kernel running but xenomai\n"
+                "  access in /sys/module/xenomai/parameters/allowed_group\n"
+                "  is set to root and not setuid root.\n"
+                "  Fix: enable /etc/init.d/xenomai (preferred) or 'sudo make setuid'\n");
+        }
+        return false;
+    }
+
+    if(!is_current_user_in_gid(gid)){
+        if(is_master){
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "Warning: Xenomai kernel running but current user not\n"
+                "  in xenomai group (gid: %i) or setuid root\n"
+                "  Fix: 'sudo adduser $USER xenomai' (preferred) or 'sudo make setuid'\n", gid);
+        }
+        return false;
+    }
+
+    return true;
+}
+#else
+static bool detect_xenomai() {
+    return false;
+}
+#endif
+#ifdef USPACE_XENOMAI_EVL
+static bool detect_xenomai_evl() {
+    //Running xenomai evl has /dev/evl but no /proc/xenomai
+    struct stat sb;
+    if(stat("/dev/evl/control", &sb) != 0){
+        //No EVL
+        return false;
+    }
+    if(has_setuid_root()){
+        //EVL and setuid, all fine
+        return true;
+    }
+
+    //Check if current user is in group of /dev/evl/control
+    //Set to evl by /usr/lib/udev/rules.d/90-libevl.rules from libevl debian package
+    //Note: There are more files in /dev/evl which need to have the proper
+    //access rights set. However, we check only one of them.
+    if (sb.st_gid == 0) {
+        if(is_master){
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "Warning: Xenomai4 EVL kernel running but /dev/evl/control\n"
+                "  access is set to root and not setuid root.\n"
+                "  Fix: enable enable 90-libevl.rules (preferred) or 'sudo make setuid'\n");
+        }
+        return false;
+    }
+
+    if(!is_current_user_in_gid(sb.st_gid)){
+        if(is_master){
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "Warning: Xenomai4 EVL kernel running but current user not\n"
+                "  in evl group (gid: %i) or setuid root\n"
+                "  Fix: 'sudo adduser $USER evl' (preferred) or 'sudo make setuid'\n", sb.st_gid);
+        }
+        return false;
+    }
+
+    return true;
+}
+#else
+static bool detect_xenomai_evl() {
+    return false;
+}
+#endif
+
+static bool detect_force(){
+    const char *force = getenv("LINUXCNC_FORCE_REALTIME");
+    if(force != NULL && atoi(force) != 0){
+        return true;
+    }else{
+        return false;
+    }
+}
+
+#ifdef __linux__
+// Diagnostic helper: report cap_effective state for a single capability.
+// Returns "yes", "no", or "unknown" if libcap could not introspect.
+static const char *cap_effective_str(cap_t caps, cap_value_t cap) {
+    if (!caps) return "unknown";
+    cap_flag_value_t v;
+    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &v) != 0) return "unknown";
+    return v == CAP_SET ? "yes" : "no";
+}
+#endif
+
+static void report_sched_fifo_error(int sched_err){
+    // Surface the actual reason so the user does not have to guess
+    // between "no caps", "stock kernel", or "wrong rlimits" (issue
+    // #3928).  errno comes from the SCHED_FIFO probe in
+    // can_set_sched_fifo(); cap state comes from libcap.
+    const char *nice_s = "unknown";
+    const char *lock_s = "unknown";
+#ifdef __linux__
+    cap_t caps = cap_get_proc();
+    if(caps == NULL){
+        rtapi_print_msg(RTAPI_MSG_ERR, "cap_get_proc failed: %m\n");
+    }else{
+        nice_s = cap_effective_str(caps, CAP_SYS_NICE);
+        lock_s = cap_effective_str(caps, CAP_IPC_LOCK);
+        cap_free(caps);
+    }
+#endif
+    rtapi_print_msg(RTAPI_MSG_ERR,
+        "Note: realtime scheduling unavailable "
+        "(sched_setscheduler SCHED_FIFO: %s).\n"
+        "  Process capabilities: cap_sys_nice=%s cap_ipc_lock=%s.\n"
+        "  Falling back to POSIX non-realtime.\n"
+        "  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' "
+        "on rtapi_app.\n"
+        "  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.\n",
+        sched_err ? strerror(sched_err) : "denied",
+        nice_s, lock_s);
+}
+
+// Success-probe for realtime scheduling: briefly try to set SCHED_FIFO on
+// the calling thread and restore the previous policy.  Succeeds when the
+// process holds CAP_SYS_NICE (file caps or setuid root) or has a matching
+// RLIMIT_RTPRIO.  Works on any kernel, so the probe also covers the
+// PREEMPT_RT-vs-stock distinction implicitly: if we can actually get
+// SCHED_FIFO, the platform can deliver realtime, regardless of how.
+// Only report an error if this check fails in master mode to not spam the user.
+static bool can_set_sched_fifo(void) {
+    struct sched_param old_param, probe_param;
+    int old_policy = sched_getscheduler(0);
+    if(old_policy < 0) {
+        if(is_master) report_sched_fifo_error(errno);
+        return false;
+    }
+    if(sched_getparam(0, &old_param) < 0) {
+        if(is_master) report_sched_fifo_error(errno);
+        return false;
+    }
+
+    memset(&probe_param, 0, sizeof(probe_param));
+    probe_param.sched_priority = sched_get_priority_min(SCHED_FIFO);
+    if(sched_setscheduler(0, SCHED_FIFO, &probe_param) < 0) {
+        if(is_master) report_sched_fifo_error(errno);
+        return false;
+    }
+
+    // Best-effort restore; if this fails we are still on SCHED_FIFO at
+    // minimum priority, which is no worse than where we started.
+    sched_setscheduler(0, old_policy, &old_param);
+    return true;
+}
+
+// rtapi_get_realtime_type() reports whether this process can actually run
+// realtime code and returns the type it should run.
+// This matches the convention used by JACK, PipeWire,
+// rtkit, Xenomai, and Klipper: surface the observed capability, not
+// kernel metadata.  The old setuid-root stat check has been removed; it
+// stat()ed EMC2_BIN_DIR/rtapi_app rather than the running binary (breaking
+// wrapper-based installs like NixOS /run/wrappers) and silently masked
+// LINUXCNC_FORCE_REALTIME (see issue #3928).
+rtapi_realtime_type_t rtapi_get_realtime_type(void){
+    static rtapi_realtime_type_t cached = REALTIME_TYPE_UNINITIALIZED;
+    if(cached != REALTIME_TYPE_UNINITIALIZED){
+        return cached;
+    }
+
+    if(!detect_force() && !can_set_sched_fifo()){
+        cached = REALTIME_TYPE_NONE;
+        return cached;
+    }
+
+    if(detect_rtai_lxrt()){
+        cached = REALTIME_TYPE_LXRT;
+        return cached;
+    }
+    if(detect_xenomai()){
+        cached = REALTIME_TYPE_XENOMAI;
+        return cached;
+    }
+    if(detect_xenomai_evl()){
+        cached = REALTIME_TYPE_XENOMAI_EVL;
+        return cached;
+    }
+    if(detect_preempt_rt()){
+        cached = REALTIME_TYPE_PREEMPT_RT;
+        return cached;
+    }
+
+    if(detect_force()){
+        //Use REALTIME_TYPE_PREEMPT_DYNAMIC / REALTIME_TYPE_UNKNOWN only if forced
+        //This is not recommended
+        if(detect_preempt_dynamic()){
+            cached = REALTIME_TYPE_PREEMPT_DYNAMIC;
+        }else{
+            if(is_master){
+                rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_get_realtime_type: Realtime type unknown but SCHED_FIFO available\n");
+            }
+            cached = REALTIME_TYPE_UNKNOWN;
+        }
+    }else{
+        if(is_master){
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "Note: realtime scheduling unavailable.\n"
+                "  Falling back to POSIX non-realtime.\n"
+                "  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.\n");
+        }
+        cached = REALTIME_TYPE_NONE;
+    }
+    return cached;
+}
+
+int rtapi_is_realtime() {
+    return rtapi_get_realtime_type() > REALTIME_TYPE_NONE;
+}
 
 struct message_t {
     msg_level_t level;
@@ -108,19 +441,27 @@ static int do_newinst_cmd(const std::string &type, const std::string &name, cons
         return -1;
     }
 
-    hal_comp_t *(*find_comp_by_name)(char *) = DLSYM<hal_comp_t *(*)(char *)>(module, "halpr_find_comp_by_name");
-    if (!find_comp_by_name) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "newinst: halpr_find_comp_by_name not found\n");
+    // In HAL rtlib:
+    // int hal_comp_invoke_make(const char *compname, const char *newname, const char *arg);
+    typedef int (*invoke_make_t)(const char *, const char *, const char *);
+    invoke_make_t invoke_make = DLSYM<invoke_make_t>(module, "hal_comp_invoke_make");
+    if(!invoke_make) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "newinst: hal_comp_invoke_make not found\n");
         return -1;
     }
 
-    hal_comp_t *comp = find_comp_by_name((char *)type.c_str());
-    if (!comp) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "newinst: component %s not found\n", type.c_str());
+    int rv = invoke_make(type.c_str(), name.c_str(), arg.c_str());
+    if(rv) {
+        if(-ENOENT == rv)
+            rtapi_print_msg(RTAPI_MSG_ERR, "newinst: component %s not found\n", type.c_str());
+        else if(-ENOEXEC == rv)
+            rtapi_print_msg(RTAPI_MSG_ERR, "newinst: component %s does not support instantiation\n", type.c_str());
+        else
+            rtapi_print_msg(RTAPI_MSG_ERR, "newinst: component %s returned error %d\n", type.c_str(), rv);
         return -1;
     }
 
-    return comp->make((char *)name.c_str(), (char *)arg.c_str());
+    return 0;
 }
 
 static int do_one_item(
@@ -307,6 +648,28 @@ static int do_debug_cmd(const std::string &value) {
     }
 }
 
+// Human-readable name of a realtime type, suitable for display by callers
+// such as 'realtime verify' and the latency tools.
+static const char *realtime_type_name(rtapi_realtime_type_t type) {
+    switch(type) {
+        case REALTIME_TYPE_UNINITIALIZED:   return "Uninitialized";
+        case REALTIME_TYPE_NONE:            return "No realtime";
+        case REALTIME_TYPE_UNKNOWN:         return "Unknown (SCHED_FIFO)";
+        case REALTIME_TYPE_PREEMPT_DYNAMIC: return "Preempt Dynamic";
+        case REALTIME_TYPE_PREEMPT_RT:      return "Preempt RT";
+        case REALTIME_TYPE_RTAI:            return "RTAI";
+        case REALTIME_TYPE_LXRT:            return "LXRT";
+        case REALTIME_TYPE_XENOMAI:         return "Xenomai";
+        case REALTIME_TYPE_XENOMAI_EVL:     return "Xenomai EVL";
+    }
+    return "BUG: unknown realtime type";
+}
+
+static int do_check_rt_cmd(std::string &out) {
+    out = realtime_type_name(rtapi_get_realtime_type());
+    return rtapi_is_realtime() == 0;
+}
+
 /*
  * Fully checked send/recv
  * Will retry on EINTR, so to abort a send_data/recv_data on a
@@ -367,8 +730,8 @@ static ssize_t recv_data(int fd, void *buf, size_t n, int flags) {
  * Protocol:
  * 
  * client->master: std::vector<std::string> args
- * master processes the args and returns result
- * master->client: int result
+ * master processes the args and returns result and stdout string
+ * master->client: int result, std::string out
  *
  * Packing:
  * args are serialized as:
@@ -381,40 +744,11 @@ static ssize_t recv_data(int fd, void *buf, size_t n, int flags) {
  * }
  * 
  * result is serialized as:
- * int
+ * uint16_t size (full package size including the size field)
+ * int result
+ * uint16_t out_size
+ * char[out_size] out
  */
-
-static bool send_result(int fd, int result) {
-    ssize_t res = send_data(fd, &result, sizeof(int), 0);
-    if (res != sizeof(int)) {
-        if (res == -1) {
-            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_result failed: %s\n", strerror(errno));
-        } else {
-            rtapi_print_msg(
-                RTAPI_MSG_ERR, "rtapi_app: send_result failed, send only %li of %li bytes\n", res, sizeof(int)
-            );
-        }
-        return false;
-    } else {
-        return true;
-    }
-}
-
-static bool recv_result(int fd, int *result) {
-    ssize_t res = recv_data(fd, result, sizeof(int), 0);
-    if (res != sizeof(int)) {
-        if (res == -1) {
-            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: recv_result failed: %s\n", strerror(errno));
-        } else {
-            rtapi_print_msg(
-                RTAPI_MSG_ERR, "rtapi_app: recv_result failed, recv only %li of %li bytes\n", res, sizeof(int)
-            );
-        }
-        return false;
-    } else {
-        return true;
-    }
-}
 
 static void push_uint16(std::vector<char> &buf, uint16_t value) {
     buf.push_back((char)(0xff & (value >> 0)));
@@ -424,6 +758,121 @@ static void push_uint16(std::vector<char> &buf, uint16_t value) {
 static uint16_t get_uint16(const std::vector<char> &buf, size_t idx) {
     //at() will check index and throw std::out_of_range
     return ((uint16_t)(unsigned char)buf.at(idx)) | ((uint16_t)(unsigned char)buf.at(idx + 1) << 8);
+}
+
+static void push_int(std::vector<char> &buf, int value) {
+    for (size_t i = 0; i < sizeof(int); i++) {
+        buf.push_back((char)(0xff & (value >> i * 8)));
+    }
+}
+
+static int get_int(const std::vector<char> &buf, size_t idx) {
+    //at() will check index and throw std::out_of_range
+    int ret = 0;
+    for (size_t i = 0; i < sizeof(int); i++) {
+        ret |= ((int)(unsigned char)buf.at(idx + i) << i * 8);
+    }
+    return ret;
+}
+
+static bool send_result(int fd, int result, const std::string &out) {
+    //Calculate size
+    size_t buff_size = sizeof(uint16_t) + sizeof(int) + sizeof(uint16_t) + out.size();
+
+    //Check uint16_t conversion of the total size; out.size() is bounded by it
+    if (buff_size > std::numeric_limits<uint16_t>::max()) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_result: result too big, size = %li!\n", buff_size);
+        return false;
+    }
+
+    //Serialize
+    std::vector<char> buf;
+    buf.reserve(buff_size);
+    push_uint16(buf, (uint16_t)buff_size);
+    push_int(buf, result);
+    push_uint16(buf, (uint16_t)out.size());
+    buf.insert(buf.end(), out.begin(), out.end());
+    if (buf.size() != buff_size) {
+        rtapi_print_msg(
+            RTAPI_MSG_ERR, "rtapi_app: Bug send_result: buf.size() %li != buff_size %li\n", buf.size(), buff_size
+        );
+        return false;
+    }
+
+    //Send
+    ssize_t res = send_data(fd, buf.data(), buf.size(), 0);
+    if (res != (ssize_t)buf.size()) {
+        if (res == -1) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_result failed: %s\n", strerror(errno));
+        } else {
+            rtapi_print_msg(
+                RTAPI_MSG_ERR, "rtapi_app: send_result failed, sent only %li of %li bytes\n", res, buf.size()
+            );
+        }
+        return false;
+    }
+    return true;
+}
+
+static bool recv_result(int fd, int *result, std::string &out) {
+    //Get size
+    uint16_t tmp;
+    ssize_t res = recv_data(fd, &tmp, sizeof(uint16_t), 0);
+    if (res != sizeof(uint16_t)) {
+        if (res == -1) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: recv_result 1 failed: %s\n", strerror(errno));
+        } else {
+            rtapi_print_msg(
+                RTAPI_MSG_ERR, "rtapi_app: recv_result 1 failed, recv only %li of %li bytes\n", res, sizeof(uint16_t)
+            );
+        }
+        return false;
+    }
+    if (tmp < sizeof(uint16_t)) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: recv_result: bad frame size %u\n", tmp);
+        return false;
+    }
+    size_t buff_size = tmp - sizeof(uint16_t); //Size already consumed
+
+    //Get data
+    std::vector<char> buf(buff_size);
+    res = recv_data(fd, buf.data(), buff_size, 0);
+    if (res != (ssize_t)buff_size) {
+        if (res == -1) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: recv_result 2 failed: %s\n", strerror(errno));
+        } else {
+            rtapi_print_msg(
+                RTAPI_MSG_ERR, "rtapi_app: recv_result 2 failed, recv only %li of %li bytes\n", res, buff_size
+            );
+        }
+        return false;
+    }
+
+    //Deserialize
+    try {
+        size_t idx = 0;
+        *result = get_int(buf, idx);
+        idx += sizeof(int);
+        size_t out_size = get_uint16(buf, idx);
+        idx += sizeof(uint16_t);
+        //Bound checked, unpack argument
+        auto start = buf.begin() + idx;
+        auto end = start + out_size;
+        if (end > buf.end()) {
+            throw std::out_of_range("recv_result: out size not in buffer range");
+        }
+        out = std::string(start, end);
+        idx += out_size;
+        if (idx != buff_size) {
+            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: Bug recv_result: idx %li != buff_size %li\n", idx, buff_size);
+            return false;
+        }
+    } catch (std::out_of_range &e) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: Bug recv_result: %s\n", e.what());
+        return false;
+    }
+
+    return true;
 }
 
 static bool recv_args(int fd, std::vector<std::string> &args) {
@@ -438,6 +887,10 @@ static bool recv_args(int fd, std::vector<std::string> &args) {
                 RTAPI_MSG_ERR, "rtapi_app: recv_args 1 failed, recv only %li of %li bytes\n", res, sizeof(uint16_t)
             );
         }
+        return false;
+    }
+    if (tmp < sizeof(uint16_t)) {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: recv_args: bad frame size %u\n", tmp);
         return false;
     }
     size_t buff_size = tmp - sizeof(uint16_t); //Size already consumed
@@ -498,12 +951,12 @@ static bool send_args(int fd, const std::vector<std::string> &args) {
     //Check uint16_t conversions
     //Buffer size is > sum(args[i].size()) so they don't need a separate check
     if (buff_size > std::numeric_limits<uint16_t>::max()) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_args: args to big, size = %li!\n", buff_size);
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_args: args too big, size = %li!\n", buff_size);
         return false;
     }
     //Edge case: One could in theory send many size zero args
     if (args.size() > std::numeric_limits<uint16_t>::max()) {
-        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_args: arg count to big, size = %li!\n", args.size());
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: send_args: arg count too big, size = %li!\n", args.size());
         return false;
     }
 
@@ -538,11 +991,17 @@ static bool send_args(int fd, const std::vector<std::string> &args) {
     return true;
 }
 
-static int handle_command(const std::vector<std::string> &args) {
+static int handle_command(const std::vector<std::string> &args, std::string &out) {
     if (args.size() == 0) {
         return 0;
     }
-    if (args.size() == 1 && args[0] == "exit") {
+    if (args.size() == 1 && args[0] == "start") {
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: start received while running\n");
+        return 0;
+    } else if (args.size() == 1 && args[0] == "ping") {
+        //Just return success
+        return 0;
+    } else if (args.size() == 1 && args[0] == "exit") {
         force_exit = 1;
         return 0;
     } else if (args.size() >= 2 && args[0] == "load") {
@@ -557,8 +1016,10 @@ static int handle_command(const std::vector<std::string> &args) {
         return do_newinst_cmd(args[1], args[2], args[3]);
     } else if (args.size() == 2 && args[0] == "debug") {
         return do_debug_cmd(args[1]);
+    } else if (args.size() == 1 && args[0] == "check_rt") {
+        return do_check_rt_cmd(out);
     } else {
-        rtapi_print_msg(RTAPI_MSG_ERR, "Unrecognized command starting with %s\n", args[0].c_str());
+        rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: unrecognized command starting with %s\n", args[0].c_str());
         return -1;
     }
 }
@@ -570,10 +1031,14 @@ static int slave(int fd, const std::vector<std::string> &args) {
     }
 
     int result = -1;
-    if (!recv_result(fd, &result)) {
+    std::string out;
+    if (!recv_result(fd, &result, out)) {
         rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: failed to read from master\n");
         return -1;
     } else {
+        if (out.length() > 0) {
+            printf("%s\n", out.c_str());
+        }
         return result;
     }
 }
@@ -593,6 +1058,7 @@ static bool master_process_socket_command(int fd) {
     } else {
         int result;
         std::vector<std::string> args;
+        std::string out;
 
         //Set timeout, so master doesn't hang forever
         struct timeval timeout;
@@ -610,19 +1076,20 @@ static bool master_process_socket_command(int fd) {
             return true; //If there is a socket error, just continue
         }
 
-        result = handle_command(args);
+        result = handle_command(args, out);
 
-        if (!send_result(fd1, result)) {
+        if (!send_result(fd1, result, out)) {
             rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: failed to write to slave\n");
         }
         close(fd1);
     }
-    return !force_exit && instance_count > 0;
+    return !force_exit;
 }
 
 static pthread_t main_thread{};
 
-static int master(int fd, const std::vector<std::string> &args) {
+static int master(int fd) {
+    is_master = true;
     main_thread = pthread_self();
     int result;
     if ((result = pthread_create(&queue_thread, nullptr, &queue_function, nullptr)) != 0) {
@@ -631,18 +1098,10 @@ static int master(int fd, const std::vector<std::string> &args) {
         return -1;
     }
     do_load_cmd("hal_lib", std::vector<std::string>());
-    instance_count = 0;
     App(); // force rtapi_app to be created
-    if (args.size()) {
-        result = handle_command(args);
-        if (result != 0)
-            goto out;
-        if (force_exit || instance_count == 0)
-            goto out;
-    }
     //Process commands as long as master should not exit
     while(master_process_socket_command(fd));
-out:
+    do_unload_cmd("hal_lib");
     pthread_cancel(queue_thread);
     pthread_join(queue_thread, nullptr);
     rtapi_msg_queue.consume_all([](const message_t &m) {
@@ -694,6 +1153,65 @@ static double diff_timespec(const struct timespec *time1, const struct timespec 
 static void raise_net_admin_ambient(void);
 #endif
 
+static int create_socket(){
+    int fd = socket(PF_UNIX, SOCK_STREAM, 0);
+    if (fd == -1) {
+        perror("socket");
+        return fd;
+    }
+
+    int enable = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
+    return fd;
+}
+
+static int start_master(int fd){
+    int result = listen(fd, 10);
+    if (result != 0) {
+        perror("listen");
+        return 1;
+    }
+    //Demonize
+    pid_t pid = fork();
+    if (pid < 0){
+        perror("fork");
+        return 1;
+    }
+    if(pid == 0){
+        setsid(); // create a new session if we can...
+        result = master(fd);
+        exit(result);
+    }else{
+        return 0;
+    }
+}
+
+static int run_slave_cmd(struct sockaddr_un *addr, int fd, const std::vector<std::string> &args){
+    int result = -1;
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    srand48(start.tv_sec ^ start.tv_nsec);
+    while (diff_timespec(&now, &start) < 3.0) {
+        result = connect(fd, (sockaddr *)addr, sizeof(*addr));
+        if (result == 0)
+            break;
+
+        usleep((useconds_t)(lrand48() % 100000) + 100); //Random sleep min 100us max 100100us
+        clock_gettime(CLOCK_MONOTONIC, &now);
+    }
+    if (result < 0 && errno == ECONNREFUSED) {
+        fprintf(stderr, "Waited 3 seconds for master.  giving up.\n");
+        close(fd);
+        return 1;
+    }
+    if (result < 0) {
+        fprintf(stderr, "connect %s: %s\n", addr->sun_path, strerror(errno));
+        return 1;
+    }
+    return slave(fd, args);
+}
+
 int main(int argc, char **argv) {
     if (getuid() == 0) {
         char *fallback_uid_str = getenv("RTAPI_UID");
@@ -732,62 +1250,83 @@ int main(int argc, char **argv) {
         args.push_back(std::string(argv[i]));
     }
 
-become_master:
-    int fd = socket(PF_UNIX, SOCK_STREAM, 0);
-    if (fd == -1) {
-        perror("socket");
-        exit(1);
-    }
-
-    int enable = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable));
     struct sockaddr_un addr;
     memset(&addr, 0x0, sizeof(addr));
     addr.sun_family = AF_UNIX;
     if (!get_fifo_path_to_addr(&addr))
         exit(1);
 
+    int fd = create_socket();
+    if (fd < 0) {
+        exit(1);
+    }
+
     // plus one because we use the abstract namespace, it will show up in
     // /proc/net/unix prefixed with an @
     int result = bind(fd, (sockaddr *)&addr, sizeof(addr));
 
     if (result == 0) {
-        //If called in master mode with exit command, no need to start master
-        //and exit again
+        //If exit is called and master is not running, just give a warning
         if (args.size() == 1 && args[0] == "exit") {
+            rtapi_print_msg(RTAPI_MSG_ERR, "rtapi_app: exit received while not running\n");
             return 0;
         }
-        int result = listen(fd, 10);
-        if (result != 0) {
-            perror("listen");
-            exit(1);
+        //If ping is called and master is not running, return an error
+        if (args.size() == 1 && args[0] == "ping") {
+            return 1;
         }
-        setsid(); // create a new session if we can...
-        result = master(fd, args);
-        return result;
-    } else if (errno == EADDRINUSE) {
-        struct timespec start, now;
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        srand48(start.tv_sec ^ start.tv_nsec);
-        while (diff_timespec(&now, &start) < 3.0) {
-            result = connect(fd, (sockaddr *)&addr, sizeof(addr));
-            if (result == 0)
-                break;
-
-            usleep((useconds_t)(lrand48() % 100000) + 100); //Random sleep min 100us max 100100us
-            clock_gettime(CLOCK_MONOTONIC, &now);
+        //If check_rt is called and master is not running, do not start master
+        //execute and return
+        //This is needed for the verify command in the realtime script
+        //If master is started, this starts up the whole realtime chain
+        //and halrun -U is needed to exit again
+        if (args.size() == 1 && args[0] == "check_rt") {
+            std::string out;
+            int ret = do_check_rt_cmd(out);
+            if (out.length() > 0) {
+                printf("%s\n", out.c_str());
+            }
+            return ret;
         }
-        if (result < 0 && errno == ECONNREFUSED) {
-            fprintf(stderr, "Waited 3 seconds for master.  giving up.\n");
+        //Start a master on start command
+        if (args.size() == 1 && args[0] == "start") {
+            result = start_master(fd);
+            if (result != 0) {
+                exit(result);
+            }
+            //Need to close and reopen the socket
+            //It is already bound and master is using it
             close(fd);
-            goto become_master;
+            int fd = create_socket();
+            if (fd < 0) {
+                exit(1);
+            }
+            //Ping master to make shure it is running
+            //before returning
+            return run_slave_cmd(&addr, fd, {"ping"});
+        }else{
+            fprintf(stderr, "WARNING: Deprecated: No active realtime environment found. Use \"realtime start\" to start one.\n"
+                "  A realtime environment is started automatically.\n"
+                "  If this appears while using halcmd: Use halrun instead.\n"
+                "  halcmd should only be used with an already running realtime environment.\n"
+                "  halrun creates a realtime environment and tears it down at exit.\n");
+            result = start_master(fd);
+            if (result != 0) {
+                exit(result);
+            }
+            //Need to close and reopen the socket
+            //It is already bound and master is using it
+            close(fd);
+            int fd = create_socket();
+            if (fd < 0) {
+                exit(1);
+            }
+            //Run command
+            //This makes also shure it is running before returning
+            return run_slave_cmd(&addr, fd, args);
         }
-        if (result < 0) {
-            fprintf(stderr, "connect %s: %s", addr.sun_path, strerror(errno));
-            exit(1);
-        }
-        return slave(fd, args);
+    } else if (errno == EADDRINUSE) {
+        return run_slave_cmd(&addr, fd, args);
     } else {
         perror("bind");
         exit(1);
@@ -916,11 +1455,7 @@ static void configure_memory() {
     free((void *)buf);
 }
 
-static int harden_rt() {
-    if (!rtapi_is_realtime())
-        return -EINVAL;
-
-    WITH_ROOT;
+static void harden_rt() {
 #if defined(__linux__) && (defined(__x86_64__) || defined(__i386__))
     if (iopl(3) < 0) {
         rtapi_print_msg(
@@ -991,7 +1526,6 @@ static int harden_rt() {
         // deliberately leak fd until program exit
     }
 #endif /* __linux__ */
-    return 0;
 }
 
 static RtapiApp *makeDllApp(const std::string &dllName, int policy) {
@@ -1014,16 +1548,7 @@ static RtapiApp *makeDllApp(const std::string &dllName, int policy) {
     return result;
 }
 
-// Diagnostic helper: report cap_effective state for a single capability.
-// Returns "yes", "no", or "unknown" if libcap could not introspect.
 #ifdef __linux__
-static const char *cap_effective_str(cap_t caps, cap_value_t cap) {
-    if (!caps) return "unknown";
-    cap_flag_value_t v;
-    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &v) != 0) return "unknown";
-    return v == CAP_SET ? "yes" : "no";
-}
-
 // Raise CAP_NET_ADMIN into the ambient set so it survives execve() into
 // child processes (iptables, ip6tables) launched by HAL drivers like
 // hm2_eth.  Linux file capabilities on rtapi_app give cap_net_admin in
@@ -1055,58 +1580,34 @@ static void raise_net_admin_ambient(void) {
 
 static RtapiApp *makeApp() {
     RtapiApp *app;
-    bool rt_ok = rtapi_is_realtime();
-    if (!rt_ok) {
-        // Surface the actual reason so the user does not have to guess
-        // between "no caps", "stock kernel", or "wrong rlimits" (issue
-        // #3928).  errno comes from the SCHED_FIFO probe in
-        // can_set_sched_fifo(); cap state comes from libcap.
-        int sched_err = rtapi_sched_fifo_errno();
-#ifdef __linux__
-        cap_t caps = cap_get_proc();
-        const char *nice_s = cap_effective_str(caps, CAP_SYS_NICE);
-        const char *lock_s = cap_effective_str(caps, CAP_IPC_LOCK);
-#else
-        const char *nice_s = "unknown";
-        const char *lock_s = "unknown";
-#endif
-        rtapi_print_msg(RTAPI_MSG_ERR,
-            "Note: realtime scheduling unavailable "
-            "(sched_setscheduler SCHED_FIFO: %s).\n"
-            "  Process capabilities: cap_sys_nice=%s cap_ipc_lock=%s.\n"
-            "  Falling back to POSIX non-realtime.\n"
-            "  Fix: 'sudo make setcap' (preferred) or 'sudo make setuid' "
-            "on rtapi_app.\n"
-            "  Override (testing only): set LINUXCNC_FORCE_REALTIME=1.\n",
-            sched_err ? strerror(sched_err) : "denied",
-            nice_s, lock_s);
-#ifdef __linux__
-        if (caps) cap_free(caps);
-#endif
-    }
-    if (!rt_ok || harden_rt() < 0) {
+    rtapi_realtime_type_t rt_type = rtapi_get_realtime_type();
+    if (rt_type == REALTIME_TYPE_NONE) {
         app = makeDllApp("liblinuxcnc-uspace-posix.so.0", SCHED_OTHER);
     } else {
         WithRoot r;
-        if (detect_xenomai_evl()) {
+        harden_rt();
+        if (rt_type == REALTIME_TYPE_XENOMAI_EVL) {
             app = makeDllApp("liblinuxcnc-uspace-xenomai-evl.so.0", SCHED_FIFO);
-        } else if (detect_xenomai()) {
+        } else if (rt_type == REALTIME_TYPE_XENOMAI) {
             app = makeDllApp("liblinuxcnc-uspace-xenomai.so.0", SCHED_FIFO);
-        } else if (detect_rtai()) {
+        } else if (rt_type == REALTIME_TYPE_LXRT) {
             app = makeDllApp("liblinuxcnc-uspace-rtai.so.0", SCHED_FIFO);
-        } else {
+        } else if (rt_type == REALTIME_TYPE_PREEMPT_RT || rt_type == REALTIME_TYPE_PREEMPT_DYNAMIC || rt_type == REALTIME_TYPE_UNKNOWN) {
             // SCHED_FIFO available but no Xenomai/RTAI backend.  Warn if the
             // kernel is not PREEMPT_RT: SCHED_FIFO still beats SCHED_OTHER,
             // but latency on a PREEMPT_DYNAMIC stock kernel can be tens of
             // milliseconds, which will surprise users who expect the same
             // bounds as a PREEMPT_RT or Xenomai setup.
-            if (!detect_preempt_rt()) {
+            if (rt_type == REALTIME_TYPE_PREEMPT_DYNAMIC || rt_type == REALTIME_TYPE_UNKNOWN) {
                 rtapi_print_msg(RTAPI_MSG_ERR,
                     "Note: SCHED_FIFO available but kernel is not PREEMPT_RT.  "
                     "Latency may be unbounded; install a PREEMPT_RT kernel "
                     "for hard realtime guarantees.\n");
             }
             app = makeDllApp("liblinuxcnc-uspace-posix.so.0", SCHED_FIFO);
+        } else {
+            app = nullptr;
+            rtapi_print_msg(RTAPI_MSG_ERR, "Bug: rt_type = %i in not handled\n", rt_type);
         }
     }
 

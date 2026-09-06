@@ -14,10 +14,10 @@
 * Last change:
 ********************************************************************/
 
+#include <stdio.h>
+#include <unistd.h>
 #include <fmt/format.h>
 
-#include <rtapi_string.h>
-#include <posemath.h>		// PM_POSE, TO_RAD
 #include <inifile.hh>
 #include "libnml/rcs/rcs.hh"
 #include "nml_intf/emc.hh"		// EMC NML
@@ -71,26 +71,26 @@ int emcTaskNmlGet()
     int retval = 0;
 
     // try to connect to EMC cmd
-    if (emcCommandBuffer == 0) {
+    if (emcCommandBuffer == nullptr) {
 	emcCommandBuffer =
 	    new RCS_CMD_CHANNEL(emcFormat, "emcCommand", "xemc",
 				emc_nmlfile);
 	if (!emcCommandBuffer->valid()) {
 	    delete emcCommandBuffer;
-	    emcCommandBuffer = 0;
+	    emcCommandBuffer = nullptr;
 	    retval = -1;
 	}
     }
     // try to connect to EMC status
-    if (emcStatusBuffer == 0) {
+    if (emcStatusBuffer == nullptr) {
 	emcStatusBuffer =
 	    new RCS_STAT_CHANNEL(emcFormat, "emcStatus", "xemc",
 				 emc_nmlfile);
 	if (!emcStatusBuffer->valid()
 	    || EMC_STAT_TYPE != emcStatusBuffer->peek()) {
 	    delete emcStatusBuffer;
-	    emcStatusBuffer = 0;
-	    emcStatus = 0;
+	    emcStatusBuffer = nullptr;
+	    emcStatus = nullptr;
 	    retval = -1;
 	} else {
 	    emcStatus = static_cast<EMC_STAT *>(emcStatusBuffer->get_address());
@@ -104,12 +104,12 @@ int emcErrorNmlGet()
 {
     int retval = 0;
 
-    if (emcErrorBuffer == 0) {
+    if (emcErrorBuffer == nullptr) {
 	emcErrorBuffer =
 	    new NML(nmlErrorFormat, "emcError", "xemc", emc_nmlfile);
 	if (!emcErrorBuffer->valid()) {
 	    delete emcErrorBuffer;
-	    emcErrorBuffer = 0;
+	    emcErrorBuffer = nullptr;
 	    retval = -1;
 	}
     }
@@ -761,7 +761,7 @@ int sendProgramOpen(const char *program)
     /* save this to run again */
     lastProgramFile = program;
     /* store filename in message */
-    rtapi_strxcpy(msg.file, program);
+    nml_strxcpy(msg.file, program);
     /* clear optional fields */
     msg.remote_buffersize = 0;
     msg.remote_filesize = 0;
@@ -876,7 +876,7 @@ int sendMdiCmd(const char *mdi)
 {
     EMC_TASK_PLAN_EXECUTE emc_task_plan_execute_msg;
 
-    rtapi_strxcpy(emc_task_plan_execute_msg.command, mdi);
+    nml_strxcpy(emc_task_plan_execute_msg.command, mdi);
     return emcSendCommandAndWait(emc_task_plan_execute_msg);
 }
 
@@ -884,7 +884,7 @@ int sendLoadToolTable(const char *file)
 {
     EMC_TOOL_LOAD_TOOL_TABLE emc_tool_load_tool_table_msg;
 
-    rtapi_strxcpy(emc_tool_load_tool_table_msg.file, file);
+    nml_strxcpy(emc_tool_load_tool_table_msg.file, file);
     return emcSendCommandAndWait(emc_tool_load_tool_table_msg);
 }
 
@@ -930,7 +930,7 @@ int sendJointLoadComp(int /*joint*/, const char *file, int type)
 {
     EMC_JOINT_LOAD_COMP emc_joint_load_comp_msg;
 
-    rtapi_strxcpy(emc_joint_load_comp_msg.file, file);
+    nml_strxcpy(emc_joint_load_comp_msg.file, file);
     emc_joint_load_comp_msg.type = type;
     return emcSendCommandAndWait(emc_joint_load_comp_msg);
 }
@@ -1012,7 +1012,7 @@ int iniLoad(const char *filename)
 
     if (auto inistring = inifile.findString("NML_FILE", "EMC")) {
 	// copy to global
-	rtapi_strxcpy(emc_nmlfile, inistring->c_str());
+	nml_strxcpy(emc_nmlfile, inistring->c_str());
     } // else not found, use default or previously set
 
     if (auto inival = mapLinearUnits(inifile, "LINEAR_UNITS", "DISPLAY")) {

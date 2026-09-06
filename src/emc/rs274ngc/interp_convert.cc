@@ -28,14 +28,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <string>
-#include <rtapi_math.h>
 #include "rs274ngc.hh"
 #include "rs274ngc_return.hh"
 #include "rs274ngc_interp.hh"
 #include "interp_internal.hh"
 #include "interp_queue.hh"
 #include "interp_parameter_def.hh"
-#include <rtapi_string.h>
 
 #include "units.h"
 #define TOOL_INSIDE_ARC(side, turn) (((side)==CUTTER_COMP::LEFT&&(turn)>0)||((side)==CUTTER_COMP::RIGHT&&(turn)<0))
@@ -2018,12 +2016,12 @@ int Interp::convert_param_comment(char *comment, char *expanded, int /*len*/)
                 int n = snprintf(valbuf, VAL_LEN, format, pvalue);
                 bool fail = (n >= VAL_LEN || n < 0);
                 if(fail)
-                    rtapi_strxcpy(valbuf, "######");
+                    rs274ngc_strxcpy(valbuf, "######");
 
             }
             else
             {
-                rtapi_strxcpy(valbuf, "######");
+                rs274ngc_strxcpy(valbuf, "######");
             }
             logDebug("found:%d value:|%s|", found, valbuf);
 
@@ -2215,6 +2213,8 @@ int Interp::convert_control_mode(
     int g_code,                   // g_code being executed (G_61, G61_1, G_64)
     double tolerance_in,          // tolerance for the path following in G64
     double naivecam_tolerance_in, // tolerance for the naivecam
+    double r_word,                // G64_R_PLANNER: R value (planner/aggressiveness)
+    bool r_present,               // G64_R_PLANNER: true if R was given on the block
     setup_pointer settings)       // pointer to machine settings
 {
     double tolerance, naivecam_tolerance;
@@ -2235,7 +2235,27 @@ int Interp::convert_control_mode(
       }
       settings->control_mode = CANON_CONTINUOUS;
       settings->tolerance = tolerance;
-      SET_MOTION_CONTROL_MODE(CANON_CONTINUOUS, tolerance);
+      /* G64_R_PLANNER: optional R word carries planner INTENT plus cornering
+       * aggressiveness (Fanuc G05.1-style level). The program never names a
+       * planner implementation; "smooth" is resolved by task against
+       * [TRAJ]SMOOTH_PLANNER, so part programs stay machine-portable.
+       * R absent -> leave planner unchanged (sentinels).
+       *   R<=0      -> trapezoidal, peak_scale unchanged
+       *   0<R<=1.0  -> smooth (jerk-limited), scale = R (clamped 0.1..1.0)
+       *   R>1.0     -> smooth, scale clamped to 1.0
+       * Note: R0 -> R0.1 is a regime flip (jerk-unlimited trapezoid), not the
+       * gentle end of a gradient; R0.1 is the gentlest setting. */
+      int planner_type = -1;          // -1 = unchanged
+      double peak_scale = -1.0;       // <0 = unchanged
+      if (r_present) {
+          if (r_word <= 0.0) {
+              planner_type = 0;       // trapezoidal / BRISK
+          } else {
+              planner_type = 1;       // smooth / SOFT (resolved by task)
+              peak_scale = (r_word > 1.0) ? 1.0 : ((r_word < 0.1) ? 0.1 : r_word);
+          }
+      }
+      SET_MOTION_CONTROL_MODE(CANON_CONTINUOUS, tolerance, planner_type, peak_scale);
 
       if (naivecam_tolerance_in >= 0){
 	      naivecam_tolerance = naivecam_tolerance_in;
@@ -2969,7 +2989,9 @@ int Interp::convert_g(block_pointer block,       //!< pointer to a block of RS27
     }
     if ((block->g_modes[GM_CONTROL_MODE] != -1) && ONCE(STEP_CONTROL_MODE)) {
 	status = convert_control_mode(block->g_modes[GM_CONTROL_MODE],
-				      block->p_number, block->q_number, settings);
+				      block->p_number, block->q_number,
+				      block->r_number, block->r_flag, /* G64_R_PLANNER */
+				      settings);
 	CHP(status);
     }
     if ((block->g_modes[GM_DISTANCE_MODE] != -1) && ONCE(STEP_DISTANCE_MODE)) {
@@ -2996,6 +3018,39 @@ int Interp::convert_g(block_pointer block,       //!< pointer to a block of RS27
       CHP(status);
   }
   return INTERP_OK;
+}
+
+/*! get_abs_position
+
+Returned Value: none
+
+Side effects:
+   abs_pos[0..8] is filled with the current absolute machine position
+   (G53 frame) for X, Y, Z, A, B, C, U, V, W.
+
+Called by: read (to fill #5021-#5029) and the #<_abs_*> named parameters.
+
+The values are in the same units and frame as the #<_abs_*> named
+parameters: the controlled point mapped through the active G92/G52,
+coordinate system rotation, G5x and tool length offset, i.e. the
+offsetless machine coordinate.
+
+*/
+
+void Interp::get_abs_position(setup_pointer s, double abs_pos[9])
+{
+    double x = s->current_x + s->axis_offset_x;
+    double y = s->current_y + s->axis_offset_y;
+    rotate(&x, &y, s->rotation_xy);
+    abs_pos[0] = x + s->origin_offset_x + s->tool_offset.tran.x;
+    abs_pos[1] = y + s->origin_offset_y + s->tool_offset.tran.y;
+    abs_pos[2] = s->current_z + s->axis_offset_z + s->origin_offset_z + s->tool_offset.tran.z;
+    abs_pos[3] = s->AA_current + s->AA_axis_offset + s->AA_origin_offset + s->tool_offset.a;
+    abs_pos[4] = s->BB_current + s->BB_axis_offset + s->BB_origin_offset + s->tool_offset.b;
+    abs_pos[5] = s->CC_current + s->CC_axis_offset + s->CC_origin_offset + s->tool_offset.c;
+    abs_pos[6] = s->u_current + s->u_axis_offset + s->u_origin_offset + s->tool_offset.u;
+    abs_pos[7] = s->v_current + s->v_axis_offset + s->v_origin_offset + s->tool_offset.v;
+    abs_pos[8] = s->w_current + s->w_axis_offset + s->w_origin_offset + s->tool_offset.w;
 }
 
 /*! convert_savehome
@@ -3395,7 +3450,8 @@ int Interp::convert_length_units(int g_code,     //!< g_code being executed (mus
 int Interp::gen_settings(
     int *int_current, int *int_saved,            // G-codes
     double * /*float_current*/, double *float_saved,  // S, F, other
-    std::string &cmd)                            // command buffer
+    std::string &cmd,                            // command buffer
+    bool include_spindle_speed)
 {
     FORCE_LC_NUMERIC_C;
     int i, val;
@@ -3416,8 +3472,11 @@ int Interp::gen_settings(
                 cmd += buf;
 		break;
 	    case GM_FIELD_FLOAT_SPEED:
-		snprintf(buf,sizeof(buf)," S%.0f", float_saved[i]);
-                cmd += buf;
+		// No S word on abort restore: the spindle was just stopped
+		if (include_spindle_speed) {
+		    snprintf(buf,sizeof(buf)," S%.0f", float_saved[i]);
+		    cmd += buf;
+		}
 		break;
 	    case GM_FIELD_FLOAT_PATH_TOLERANCE:
 	    case GM_FIELD_FLOAT_NAIVE_CAM_TOLERANCE:
@@ -3606,13 +3665,13 @@ int Interp::gen_restore_cmd(int *current_g,
 	     cmd.c_str());
     }
 
+    // M codes and spindle speed should not be restored during an abort
     if ((res = gen_settings(
-	     current_g, saved_g, current_settings, saved_settings, cmd))) {
+	     current_g, saved_g, current_settings, saved_settings, cmd, false))) {
 	logStateTags("gen_restore_cmd():  error restoring settings (%d)",
 		     res);
         return INTERP_ERROR;
     }
-    // M codes should not be restored during an abort with gen_m_codes()
 
     return INTERP_OK;
 }
@@ -3680,7 +3739,7 @@ int Interp::restore_settings(setup_pointer settings,
 	(int *)settings->sub_context[from_level].saved_g_codes,
 	(double *)settings->active_settings,
 	(double *)settings->sub_context[from_level].saved_settings,
-	cmd);
+	cmd, true);
     gen_m_codes(
 	(int *) settings->active_m_codes,
 	(int *)settings->sub_context[from_level].saved_m_codes,
@@ -3696,7 +3755,7 @@ int Interp::restore_settings(setup_pointer settings,
 	    int status = execute(s);
 	    if (status != INTERP_OK) {
 		char currentError[LINELEN+1];
-		rtapi_strxcpy(currentError,getSavedError());
+		rs274ngc_strxcpy(currentError,getSavedError());
 		CHKS(status, _("M7x: restore_settings failed executing: '%s': %s"), s, currentError);
 	    }
 	    s = strtok_r(NULL, "\n", &stateptr);
@@ -4237,7 +4296,7 @@ if (is_user_defined_m_code(block, settings, 10) && ONCE_M(10)) {
  } else if ((block->m_modes[10] != -1)  && ONCE_M(10)){
      /* user-defined M codes */
     int index = block->m_modes[10];
-    if (USER_DEFINED_FUNCTION[index - 100] == 0) {
+    if (USER_DEFINED_FUNCTION[index - 100] == NULL) {
       CHKS(1, NCE_UNKNOWN_M_CODE_USED,index);
     }
     enqueue_M_USER_COMMAND(index,block->p_number,block->q_number);
@@ -4693,9 +4752,19 @@ int Interp::convert_setup_tool(block_pointer block, setup_pointer settings) {
         }
     }
 
-    // #5401-#5409 reflect the applied tool length offset (G43-family).
-    // G10 L1/L10/L11 modify the tool table but do not apply offsets to
-    // motion, so do not update them here.  See #2994.
+    // #5401-#5409 hold the loaded tool's stored offset, refreshed here so
+    // G10 L1/L10/L11 edits to the loaded tool are reflected.  The offset
+    // actually applied to motion (G43/G43.1/G43.2) is reported by
+    // #5081-#5089.
+    settings->parameters[5401] = settings->tool_table[0].offset.tran.x;
+    settings->parameters[5402] = settings->tool_table[0].offset.tran.y;
+    settings->parameters[5403] = settings->tool_table[0].offset.tran.z;
+    settings->parameters[5404] = settings->tool_table[0].offset.a;
+    settings->parameters[5405] = settings->tool_table[0].offset.b;
+    settings->parameters[5406] = settings->tool_table[0].offset.c;
+    settings->parameters[5407] = settings->tool_table[0].offset.u;
+    settings->parameters[5408] = settings->tool_table[0].offset.v;
+    settings->parameters[5409] = settings->tool_table[0].offset.w;
     settings->parameters[5410] = settings->tool_table[0].diameter;
     settings->parameters[5411] = settings->tool_table[0].frontangle;
     settings->parameters[5412] = settings->tool_table[0].backangle;
@@ -5262,10 +5331,32 @@ int Interp::convert_stop(block_pointer block,    //!< pointer to a block of RS27
     }
 
 /*10*/
-    if (settings->disable_g92_persistence)
+    if (settings->disable_g92_persistence) {
       // Clear G92/G52 offset
       for (index=5210; index<=5219; index++)
           settings->parameters[index] = 0;
+      settings->current_x = settings->current_x + settings->axis_offset_x;
+      settings->current_y = settings->current_y + settings->axis_offset_y;
+      settings->current_z = settings->current_z + settings->axis_offset_z;
+      settings->AA_current = (settings->AA_current + settings->AA_axis_offset);
+      settings->BB_current = (settings->BB_current + settings->BB_axis_offset);
+      settings->CC_current = (settings->CC_current + settings->CC_axis_offset);
+      settings->u_current = (settings->u_current + settings->u_axis_offset);
+      settings->v_current = (settings->v_current + settings->v_axis_offset);
+      settings->w_current = (settings->w_current + settings->w_axis_offset);
+
+      SET_G92_OFFSET(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+      settings->axis_offset_x = 0.0;
+      settings->axis_offset_y = 0.0;
+      settings->axis_offset_z = 0.0;
+      settings->AA_axis_offset = 0.0;
+      settings->BB_axis_offset = 0.0;
+      settings->CC_axis_offset = 0.0;
+      settings->u_axis_offset = 0.0;
+      settings->v_axis_offset = 0.0;
+      settings->w_axis_offset = 0.0;
+    }
 
     if (block->m_modes[4] == 30)
       PALLET_SHUTTLE();
@@ -6344,21 +6435,23 @@ int Interp::convert_tool_length_offset(int g_code,       //!< g_code being execu
 
   settings->tool_offset = tool_offset;
 
-  // Update parameters #5401-#5409 to reflect the actually applied tool
-  // length offset (covers G43Hn with n != loaded tool, G43.1 dynamic
-  // offsets, and G43.2 additive offsets). Without this, params lag the
-  // applied offset and only refresh on M6 / G10 L1.  See issue #2994.
+  // Update parameters #5081-#5089 to reflect the tool length offset
+  // actually applied to motion (covers G43, G43Hn with n != loaded tool,
+  // G43.1 dynamic offsets, G43.2 additive offsets, and G49 which zeroes
+  // them).  This mirrors the Fanuc #5081-#5088 semantic.  #5401-#5409, by
+  // contrast, track the loaded tool's stored offset and refresh on M6 /
+  // G10 L1.  See issue #2994.
   // tool_offset here is in program units; params follow the user-unit
-  // convention used elsewhere when populating #5401-#5409.
-  settings->parameters[5401] = PROGRAM_TO_USER_LEN(tool_offset.tran.x);
-  settings->parameters[5402] = PROGRAM_TO_USER_LEN(tool_offset.tran.y);
-  settings->parameters[5403] = PROGRAM_TO_USER_LEN(tool_offset.tran.z);
-  settings->parameters[5404] = PROGRAM_TO_USER_ANG(tool_offset.a);
-  settings->parameters[5405] = PROGRAM_TO_USER_ANG(tool_offset.b);
-  settings->parameters[5406] = PROGRAM_TO_USER_ANG(tool_offset.c);
-  settings->parameters[5407] = PROGRAM_TO_USER_LEN(tool_offset.u);
-  settings->parameters[5408] = PROGRAM_TO_USER_LEN(tool_offset.v);
-  settings->parameters[5409] = PROGRAM_TO_USER_LEN(tool_offset.w);
+  // convention used elsewhere.
+  settings->parameters[5081] = PROGRAM_TO_USER_LEN(tool_offset.tran.x);
+  settings->parameters[5082] = PROGRAM_TO_USER_LEN(tool_offset.tran.y);
+  settings->parameters[5083] = PROGRAM_TO_USER_LEN(tool_offset.tran.z);
+  settings->parameters[5084] = PROGRAM_TO_USER_ANG(tool_offset.a);
+  settings->parameters[5085] = PROGRAM_TO_USER_ANG(tool_offset.b);
+  settings->parameters[5086] = PROGRAM_TO_USER_ANG(tool_offset.c);
+  settings->parameters[5087] = PROGRAM_TO_USER_LEN(tool_offset.u);
+  settings->parameters[5088] = PROGRAM_TO_USER_LEN(tool_offset.v);
+  settings->parameters[5089] = PROGRAM_TO_USER_LEN(tool_offset.w);
 
   return INTERP_OK;
 }

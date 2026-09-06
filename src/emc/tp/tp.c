@@ -17,7 +17,6 @@
 #include <motion_types.h>
 #include "../motion/motion.h"
 #include "../motion/mot_priv.h"
-#include "../motion/axis.h"
 #include "tp.h"
 #include "tc.h"
 #include "spherical_arc.h"
@@ -46,16 +45,6 @@
 #undef TP_SHOW_BLENDS
 
 #define TP_OPTIMIZATION_LAZY
-
-#define MAKE_TP_HAL_PINS
-#undef  MAKE_TP_HAL_PINS
-
-// api for tpCreate() inherits a component id  provision to include hal pins:
-// (not used by the this default tp implementation but may
-//  be used in alternate user-built implementations)
-#ifdef  MAKE_TP_HAL_PINS // {
-#include <hal.h>
-#endif // }
 
 emcmot_status_t *emcmotStatus;
 emcmot_config_t *emcmotConfig;
@@ -130,10 +119,10 @@ STATIC double estimateParabolicBlendPerformance(
         TC_STRUCT const *tc,
         TC_STRUCT const *nexttc);
 
-STATIC int tpCheckEndCondition(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc);
+STATIC int tpCheckEndCondition(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int in_overlap);
 
 STATIC int tpUpdateCycle(TP_STRUCT * const tp,
-        TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int* mode);
+        TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int* mode, int in_overlap);
 
 STATIC int tpRunOptimization(TP_STRUCT * const tp);
 
@@ -381,41 +370,6 @@ STATIC inline double tpGetSignedSpindlePosition(spindle_status_t *status) {
  * Create the trajectory planner structure with an empty queue.
  */
 
-#ifdef MAKE_TP_HAL_PINS // {
-static struct  tp_haldata {
-  // Example pin pointers
-  hal_u32_t *in;
-  hal_u32_t *out;
-  // Example parameters
-  hal_float_t param_rw;
-  hal_float_t param_ro;
-} *tp_haldata;
-
-static int makepins(int id) {
-#define HAL_PREFIX "tp"
-    int res=0;
-    if (id < 0) goto error;
-    tp_haldata = hal_malloc(sizeof(struct tp_haldata));
-    if (!tp_haldata) goto error;
-
-    // hal pin examples:
-    res += hal_pin_u32_newf(HAL_IN ,&(tp_haldata->in) ,id,"%s.in" ,HAL_PREFIX);
-    res += hal_pin_u32_newf(HAL_OUT,&(tp_haldata->out),id,"%s.out",HAL_PREFIX);
-
-    // hal parameter examples:
-    res += hal_param_float_newf(HAL_RW, &tp_haldata->param_rw,id,"%s.param-rw",HAL_PREFIX);
-    res += hal_param_float_newf(HAL_RO, &tp_haldata->param_ro,id,"%s.param-ro",HAL_PREFIX);
-
-    if (res) goto error;
-    rtapi_print("@@@ %s:%s: ok\n",__FILE__,__FUNCTION__);
-    return 0;  // caller issues hal_ready()
-error:
-    rtapi_print("\n!!! %s:%s: failed res=%d\n\n",__FILE__,__FUNCTION__,res);
-    return -1;
-#undef HAL_PREFIX
-}
-#endif // }
-
 int tpCreate(TP_STRUCT * const tp, int _queueSize,int id)
 {
     (void)id;
@@ -434,12 +388,6 @@ int tpCreate(TP_STRUCT * const tp, int _queueSize,int id)
     if (-1 == tcqCreate(&tp->queue, tp->queueSize, tcSpace)) {
         return TP_ERR_FAIL;
     }
-
-#ifdef MAKE_TP_HAL_PINS // {
-    if (-1 == makepins(id)) {
-        return TP_ERR_FAIL;
-    }
-#endif // }
 
     /* init the rest of our data */
     return tpInit(tp);
@@ -466,6 +414,23 @@ int tpClearDIOs(TP_STRUCT * const tp) {
     return TP_ERR_OK;
 }
 
+/* Return borrowed pool planners before a queue reset (tcqInit), which drops the
+ * slots without going through tpCompleteSegment. Without this the active
+ * segment's pool slot stays in_use forever, exhausting the pool over repeated
+ * clears/aborts. Safe on an empty queue (tcqLen <= 0; tcCleanupRuckig ignores
+ * NULL). */
+STATIC void tpReleaseQueuedPlanners(TP_STRUCT * const tp)
+{
+    int n = tcqLen(&tp->queue);
+    int i;
+    for (i = 0; i < n; i++) {
+        TC_STRUCT *tc = tcqItem(&tp->queue, i);
+        if (tc) {
+            tcCleanupRuckig(tc);
+        }
+    }
+}
+
 /**
  *    "Soft initialize" the trajectory planner tp.
  *    This is a "soft" initialization in that TP_STRUCT configuration
@@ -477,6 +442,7 @@ int tpClearDIOs(TP_STRUCT * const tp) {
  */
 int tpClear(TP_STRUCT * const tp)
 {
+    tpReleaseQueuedPlanners(tp);
     tcqInit(&tp->queue);
     tp->queueSize = 0;
     tp->goalPos = tp->currentPos;
@@ -2640,7 +2606,7 @@ STATIC void tpDebugCycleInfo(TP_STRUCT const * const tp, TC_STRUCT const * const
  * non-zero velocity at the instant the target is reached.
  */
 void tpCalculateTrapezoidalAccel(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc,
-        double * const acc, double * const vel_desired)
+        double * const acc, double * const vel_desired, int in_overlap)
 {
     tc_debug_print("using trapezoidal acceleration\n");
 
@@ -2658,7 +2624,7 @@ void tpCalculateTrapezoidalAccel(TP_STRUCT const * const tp, TC_STRUCT * const t
 
     /* Calculations for desired velocity based on trapezoidal profile */
     double dx = tcGetDistanceToGo(tc, tp->reverse_run);
-    double maxaccel = tcGetTangentialMaxAccel(tc);
+    double maxaccel = tcGetCycleMaxAccel(tc, in_overlap);
 
     double discr_term1 = pmSq(tc_finalvel);
     double discr_term2 = maxaccel * (2.0 * dx - tc->currentvel * tc->cycle_time);
@@ -2703,7 +2669,8 @@ STATIC int tpCalculateRampAccel(TP_STRUCT const * const tp,
         TC_STRUCT * const tc,
         TC_STRUCT const * const nexttc,
         double * const acc,
-        double * const vel_desired)
+        double * const vel_desired,
+        int in_overlap)
 {
     tc_debug_print("using ramped acceleration\n");
     // displacement remaining in this segment
@@ -2736,7 +2703,7 @@ STATIC int tpCalculateRampAccel(TP_STRUCT const * const tp,
     double acc_final = dv / dt;
 
     // Saturate estimated acceleration against maximum allowed by segment
-    double acc_max = tcGetTangentialMaxAccel(tc);
+    double acc_max = tcGetCycleMaxAccel(tc, in_overlap);
 
     // Output acceleration and velocity for position update
     *acc = saturate(acc_final, acc_max);
@@ -2802,14 +2769,26 @@ STATIC int tcUpdateDistFromSCurveAccel(TC_STRUCT *const tc, double acc, double j
  * non-zero velocity at the instant the target is reached.
  */
 int tpCalculateSCurveAccel(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc,
-        double * const acc, double * const jerk, double * const vel_desired, double * const pos_error, int blend, double * const req_pos)
+        double * const acc, double * const jerk, double * const vel_desired, double * const pos_error, int blend, double * const req_pos,
+        int in_overlap)
 {
     tc_debug_print("using s-curve acceleration with Ruckig\n");
 
     double maxjerk = fmin(tc->maxjerk, emcmotStatus->jerk);
     if(maxjerk <= 1){
         maxjerk = 1;
-        rtapi_print_msg(RTAPI_MSG_ERR, "ERROR!!! maxjerk Is less than 1\n");
+        /* This fires EVERY CYCLE for segments with no usable jerk limit (e.g. a
+         * rotary-only move when [AXIS_A/B/C]MAX_JERK is unset, found via G43.4
+         * TCP testing on a stock sim). The fallback below is graceful
+         * (trapezoidal for the segment), so warn ONCE instead of storming the
+         * log at servo rate. */
+        static int scurve_jerk_warned = 0;
+        if (!scurve_jerk_warned) {
+            scurve_jerk_warned = 1;
+            rtapi_print_msg(RTAPI_MSG_ERR,
+                "S-curve: segment max jerk < 1 (unset [AXIS_*]MAX_JERK or [TRAJ]MAX_LINEAR_JERK?) - "
+                "trapezoidal fallback used for such segments (reported once)\n");
+        }
         return TP_SCURVE_ACCEL_ERROR;
     }
 
@@ -2819,7 +2798,7 @@ int tpCalculateSCurveAccel(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_
     double tc_finalvel = tpGetRealFinalVel(tp, tc, nexttc);
 
     double dx = tcGetDistanceToGo(tc, tp->reverse_run);
-    double maxaccel = tcGetTangentialMaxAccel(tc);
+    double maxaccel = tcGetCycleMaxAccel(tc, in_overlap);
 
     *pos_error = 0;
     if(!blend && tc->cycle_time < TP_TIME_EPSILON){
@@ -2844,8 +2823,8 @@ int tpCalculateSCurveAccel(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_
 
     // Check if planner needs to be created or replanned
     if (!tc->ruckig_planner) {
-        // Create Ruckig planner
-        tc->ruckig_planner = ruckig_create(tc->cycle_time);
+        // Borrow a Ruckig planner from the preallocated pool (no RT-cycle alloc)
+        tc->ruckig_planner = ruckig_pool_acquire(tc->cycle_time);
         if (!tc->ruckig_planner) {
             rtapi_print_msg(RTAPI_MSG_ERR, "tpCalculateSCurveAccel: failed to create Ruckig planner\n");
             return TP_SCURVE_ACCEL_ERROR;
@@ -3277,7 +3256,9 @@ STATIC void tpUpdateBlend(TP_STRUCT * const tp, TC_STRUCT * const tc,
     if(is_abort) mode = 0;
     else mode = 1;
     
-    tpUpdateCycle(tp, nexttc, NULL, &mode);
+    // Secondary segment of an active parabolic blend: it overlaps the primary
+    // this cycle, so the 1/2 accel split applies.
+    tpUpdateCycle(tp, nexttc, NULL, &mode, 1);
     //Restore the original target velocity
     nexttc->target_vel = save_vel;
 }
@@ -3291,6 +3272,7 @@ STATIC void tpUpdateBlend(TP_STRUCT * const tp, TC_STRUCT * const tc,
 STATIC void tpHandleEmptyQueue(TP_STRUCT * const tp)
 {
 
+    tpReleaseQueuedPlanners(tp);
     tcqInit(&tp->queue);
     tp->goalPos = tp->currentPos;
     tp->done = 1;
@@ -3391,6 +3373,7 @@ STATIC tp_err_t tpHandleAbort(TP_STRUCT * const tp, TC_STRUCT * const tc,
     if( MOTION_ID_VALID(tp->spindle.waiting_for_index) ||
             MOTION_ID_VALID(tp->spindle.waiting_for_atspeed) ||
             (tc->currentvel == 0.0 && (!nexttc || nexttc->currentvel == 0.0))) {
+        tpReleaseQueuedPlanners(tp);
         tcqInit(&tp->queue);
         tp->goalPos = tp->currentPos;
         tp->done = 1;
@@ -3692,7 +3675,7 @@ STATIC int tpDoParabolicBlending(TP_STRUCT * const tp, TC_STRUCT * const tc,
  * Handles the majority of updates on a single segment for the current cycle.
  */
 STATIC int tpUpdateCycle(TP_STRUCT * const tp,
-        TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int* mode) {
+        TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int* mode, int in_overlap) {
 
     //placeholders for position for this update
     EmcPose before;
@@ -3717,13 +3700,13 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
         // Also, don't ramp up for parabolic blends
         if (tc->accel_mode && tc->term_cond == TC_TERM_COND_TANGENT) {
             if(planner_type == 0)
-                res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired);
+                res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
         }
 
         // Check the return in case the ramp calculation failed, fall back to trapezoidal
         if (res_accel != TP_ERR_OK) {
             if(planner_type == 0)
-                tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired);
+                tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
         }
 
         tcUpdateDistFromAccel(tc, acc, vel_desired, tp->reverse_run);
@@ -3735,17 +3718,17 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
             double req_pos = -1.0;  // -1.0 means not provided
             tc->cycle_time = tp->cycleTime;
 
-            int is_dec = tpCalculateSCurveAccel(tp, tc, nexttc, &acc, &jerk, &vel_desired, &perror, 1, &req_pos);
+            int is_dec = tpCalculateSCurveAccel(tp, tc, nexttc, &acc, &jerk, &vel_desired, &perror, 1, &req_pos, in_overlap);
             if(is_dec == TP_SCURVE_ACCEL_ERROR){ //If the calculation fails, revert to T-shaped acceleration/deceleration.
                 *mode = TP_SCURVE_ACCEL_ERROR;
                 res_accel = 1;
                 acc=0, vel_desired=0;
                 if (tc->accel_mode && tc->term_cond == TC_TERM_COND_TANGENT) {
-                    res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired);
+                    res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
                 }
                 // Check the return in case the ramp calculation failed, fall back to trapezoidal
                 if (res_accel != TP_ERR_OK) {
-                    tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired);
+                    tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
                 }
                 tcUpdateDistFromAccel(tc, acc, vel_desired, tp->reverse_run);
             }else{
@@ -3755,17 +3738,17 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
             double jerk;
             double perror;
             double req_pos = -1.0;  // -1.0 means not provided
-            int is_dec = tpCalculateSCurveAccel(tp, tc, nexttc, &acc, &jerk, &vel_desired, &perror, 0, &req_pos);
+            int is_dec = tpCalculateSCurveAccel(tp, tc, nexttc, &acc, &jerk, &vel_desired, &perror, 0, &req_pos, in_overlap);
             if(is_dec == TP_SCURVE_ACCEL_ERROR){ //If the calculation fails, revert to T-shaped acceleration/deceleration.
                 *mode = TP_SCURVE_ACCEL_ERROR;
                 res_accel = 1;
                 acc=0, vel_desired=0;
                 if (tc->accel_mode && tc->term_cond == TC_TERM_COND_TANGENT) {
-                    res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired);
+                    res_accel = tpCalculateRampAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
                 }
                 // Check the return in case the ramp calculation failed, fall back to trapezoidal
                 if (res_accel != TP_ERR_OK) {
-                    tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired);
+                    tpCalculateTrapezoidalAccel(tp, tc, nexttc, &acc, &vel_desired, in_overlap);
                 }
                 tcUpdateDistFromAccel(tc, acc, vel_desired, tp->reverse_run);
             }else{
@@ -3777,7 +3760,7 @@ STATIC int tpUpdateCycle(TP_STRUCT * const tp,
     }
 
     //Check if we're near the end of the cycle and set appropriate changes
-    tpCheckEndCondition(tp, tc, nexttc);
+    tpCheckEndCondition(tp, tc, nexttc, in_overlap);
 
     EmcPose displacement;
 
@@ -3843,7 +3826,7 @@ STATIC inline int tcSetSplitCycle(TC_STRUCT * const tc, double split_time,
  * then we flag the segment as "splitting", so that during the next cycle,
  * it handles the transition to the next segment.
  */
-STATIC int tpCheckEndCondition(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc) {
+STATIC int tpCheckEndCondition(TP_STRUCT const * const tp, TC_STRUCT * const tc, TC_STRUCT const * const nexttc, int in_overlap) {
 
     //Assume no split time unless we find otherwise
     tc->cycle_time = tp->cycleTime;
@@ -3901,7 +3884,7 @@ STATIC int tpCheckEndCondition(TP_STRUCT const * const tp, TC_STRUCT * const tc,
 
     //If this is a valid acceleration, then we're done. If not, then we solve
     //for v_f and dt given the max acceleration allowed.
-    double a_max = tcGetTangentialMaxAccel(tc);
+    double a_max = tcGetCycleMaxAccel(tc, in_overlap);
 
     //If we exceed the maximum acceleration, then the dt estimate is too small.
     double a = a_f;
@@ -4024,7 +4007,9 @@ STATIC int tpHandleSplitCycle(TP_STRUCT * const tp, TC_STRUCT * const tc,
     TC_STRUCT *next2tc = tcqItem(&tp->queue, queue_dir_step*2);
     
     int mode = 0;
-    tpUpdateCycle(tp, nexttc, next2tc, &mode);
+    // Tangent hand-off after a split cycle: no simultaneous parabolic blend, so
+    // the next segment runs at full acceleration.
+    tpUpdateCycle(tp, nexttc, next2tc, &mode, 0);
 
     // Update status for the split portion
     // FIXME redundant tangent check, refactor to switch
@@ -4053,7 +4038,12 @@ STATIC int tpHandleRegularCycle(TP_STRUCT * const tp,
     tc->cycle_time = tp->cycleTime;
     
     int mode = 0;
-    tpUpdateCycle(tp, tc, nexttc, &mode);
+    // The 1/2 parabolic-blend accel reduction is only needed while this segment
+    // actually overlaps a neighbor in an active blend. blending_next latches once
+    // the blend into nexttc has begun; away from that (lone segment, accel from
+    // rest, decel to a final stop) the segment gets its full path acceleration.
+    int in_overlap = (nexttc != NULL) && tc->blending_next;
+    tpUpdateCycle(tp, tc, nexttc, &mode, in_overlap);
 
     /* Parabolic blending */
 
@@ -4389,5 +4379,3 @@ EXPORT_SYMBOL(tpSetVlimit);
 EXPORT_SYMBOL(tpSetVmax);
 
 EXPORT_SYMBOL(tcqFull);
-
-#undef MAKE_TP_HAL_PINS

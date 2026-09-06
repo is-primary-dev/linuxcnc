@@ -27,10 +27,8 @@ namespace bp = boost::python;
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "rs274ngc.hh"
-#include "rs274ngc_return.hh"
 #include "rs274ngc_interp.hh"
 #include "interp_internal.hh"
-#include <rtapi_string.h>
 
 #include <string>
 #include <string_view>
@@ -416,7 +414,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
     memset((void *)&r, 0, sizeof(remap));
     r.modal_group = -1; // mark as unset, required param for m/g
     r.motion_code = INT_MIN;
-    rtapi_strxcpy(iniline, inistring);
+    rs274ngc_strxcpy(iniline, inistring);
     // strip trailing comments
     if ((s = strchr(iniline, '#')) != NULL) {
 	*s = '\0';

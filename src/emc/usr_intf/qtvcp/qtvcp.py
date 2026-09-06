@@ -114,6 +114,23 @@ class QTVCP:
         global APP
         APP = MyApplication(sys.argv)
 
+        # Install signal handlers before the slow screen construction. SIGINT's
+        # default handler raises KeyboardInterrupt, so an interrupt mid-build
+        # would otherwise be an unhandled exception. Before the loop runs
+        # APP.quit() is a no-op, so exit cleanly instead.
+        self._loop_running = False
+        def _handle_quit_signal(signum, frame):
+            if self._loop_running:
+                APP.quit()
+            else:
+                try:
+                    self.shutdown()
+                except Exception:
+                    pass
+                os._exit(0)
+        signal.signal(signal.SIGTERM, _handle_quit_signal)
+        signal.signal(signal.SIGINT, _handle_quit_signal)
+
         # a specific path has been set to load from or...
         # no path set but -ini is present: default qtvcp screen...or
         # oops error
@@ -447,17 +464,8 @@ Pressing cancel will close linuxcnc.""" % target)
             if (INITITLE !=''):
                 window.setWindowTitle(INITITLE)
 
-        # catch control c and terminate signals
-        # Quit the Qt event loop on the signal so APP.exec() returns and the
-        # shutdown() below runs the normal cleanup once. Calling shutdown()
-        # directly from the handler would clean up but leave the loop running.
-        # Quitting the loop also bypasses the window-close confirmation dialog,
-        # which is correct for a terminate request and leaves that interactive
-        # feature untouched. Qt's C++ event loop does not return to Python often
-        # enough to run Python signal handlers, so a periodic no-op timer yields
-        # to the interpreter to let them fire.
-        signal.signal(signal.SIGTERM, lambda *a: APP.quit())
-        signal.signal(signal.SIGINT, lambda *a: APP.quit())
+        # Handlers were installed above. Qt's C++ event loop rarely returns to
+        # Python, so a periodic no-op timer yields to let them fire.
         self._signal_timer = QtCore.QTimer()
         self._signal_timer.timeout.connect(lambda: None)
         self._signal_timer.start(200)
@@ -478,7 +486,9 @@ Pressing cancel will close linuxcnc.""" % target)
 
         # start loop
         global _app
+        self._loop_running = True
         _app = APP.exec()
+        self._loop_running = False
         self.shutdown()
 
     # finds the postgui file name and INI file path
@@ -556,6 +566,25 @@ Pressing cancel will close linuxcnc.""" % target)
                     + "information may be useful in troubleshooting:\n"
                     + 'LinuxCNC Version  : %s\n'% self.INFO.LINUXCNC_VERSION)
 
+            # Always surface unhandled exceptions to stderr/log. A crash is a
+            # serious problem that must be visible in CI logs, not buried in a
+            # dialog that the run never captures.
+            sys.stderr.write(''.join(lines))
+            sys.stderr.flush()
+            LOG.critical("Qtvcp unhandled exception:\n{}".format(''.join(lines)))
+
+            # Offscreen (e.g. CI): nobody can dismiss a modal dialog, so
+            # msg.exec_() below would block forever; if this happens during
+            # construction it hangs before the SIGTERM handler is armed and the
+            # process cannot be killed cleanly. Exit instead of popping a dialog.
+            app = QtWidgets.QApplication.instance()
+            if app is None or app.platformName() == 'offscreen':
+                try:
+                    self.shutdown()
+                except Exception:
+                    pass
+                os._exit(1)
+
             msg = QtWidgets.QMessageBox()
             msg.setIcon(QtWidgets.QMessageBox.Critical)
             msg.setText(self._message)
@@ -579,6 +608,8 @@ Pressing cancel will close linuxcnc.""" % target)
             if retval == QtWidgets.QMessageBox.Abort: #cancel button
                 LOG.critical("Aborted from Error Dialog\n {}\n{}\n".format(self._message,''.join(lines)))
                 self.shutdown()
+                global APP
+                APP.quit()
             else:
                 ERROR_COUNT = 0
                 LOG.critical("Retry from Error Dialog\n {}\n{}\n".format(self._message,''.join(lines)))

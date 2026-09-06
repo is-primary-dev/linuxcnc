@@ -48,20 +48,19 @@
   The code from University of Palermo is modified to work on planes xy, yz and zx by Joachim Franek
   */
 
-#include "config.h"
 #include <stdio.h>
 #include <stdarg.h>
 #include <math.h>
 #include <string.h>		// strncpy()
 #include <ctype.h>		// isspace()
+#include "libnml/rcs/rcs_print.hh"
 #include "nml_intf/emc.hh"		// EMC NML
 #include "nml_intf/emc_nml.hh"
 #include "nml_intf/canon.hh"
 #include "nml_intf/canon_position.hh"		// data type for a machine position
 #include "nml_intf/interpl.hh"		// interp_list
 #include "nml_intf/emcglb.h"		// TRAJ_MAX_VELOCITY
-#include <rtapi_string.h>
-#include "rs274ngc/modal_state.hh"
+#include "nml_intf/modal_state.hh"
 #include "tooldata/tooldata.hh"
 #include <algorithm>
 
@@ -1443,7 +1442,8 @@ void STRAIGHT_PROBE(int line_number,
 
 /* Machining Attributes */
 
-void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance)
+void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance,
+                             int planner_type, double scurve_peak_scale)
 {
     auto setTermCondMsg = std::make_unique<EMC_TRAJ_SET_TERM_COND>();
 
@@ -1451,6 +1451,12 @@ void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance)
 
     canon.motionMode = mode;
     canon.motionTolerance =  FROM_PROG_LEN(tolerance);
+
+    /* G64_R_PLANNER: carry the optional planner mode (from a G64 R word) on the
+     * same queued message so it is applied at this exact point in program order.
+     * Sentinels (<0) mean "unchanged" and are ignored by task. */
+    setTermCondMsg->planner_type = planner_type;
+    setTermCondMsg->scurve_peak_scale = scurve_peak_scale;
 
     switch (mode) {
     case CANON_CONTINUOUS:
@@ -3017,12 +3023,13 @@ void SET_SPINDLE_SPEED(int s, double speed_rpm)
     interp_list.append(SPINDLE_SPEED_<EMC_SPINDLE_SPEED>(s, 0, speed_rpm));
 }
 
-void STOP_SPINDLE_TURNING(int s)
+void STOP_SPINDLE_TURNING(int s, int wait_for_atspeed)
 {
     auto emc_spindle_off_msg = std::make_unique<EMC_SPINDLE_OFF>();
 
     flush_segments();
     emc_spindle_off_msg->spindle = s;
+    emc_spindle_off_msg->wait_for_spindle_at_speed = wait_for_atspeed;
     interp_list.append(std::move(emc_spindle_off_msg));
     // Added by atp 6/1/18 not sure this is right. There is a problem that the _second_ S word starts the spindle without M3/M4
     canon.spindle[s].dir = 0;
@@ -3695,7 +3702,7 @@ CANON_TOOL_TABLE GET_EXTERNAL_TOOL_TABLE(int idx)
         tdata.orientation = 0;
     } else {
         if (tooldata_get(&tdata,idx) != IDX_OK) {
-            fprintf(stderr,"UNEXPECTED idx %s %d\n",__FILE__,__LINE__);
+            rcs_print_error("UNEXPECTED idx %s %d\n",__FILE__,__LINE__);
         }
     }
     return tdata;
@@ -3890,7 +3897,7 @@ void GET_EXTERNAL_PARAMETER_FILE_NAME(char *file_name,	/* string: to copy
 				      int max_size)
 {				/* maximum number of characters to copy */
     // Paranoid checks
-    if (0 == file_name)
+    if (NULL == file_name)
 	return;
 
     if (max_size < 0)
@@ -4155,7 +4162,7 @@ double GET_EXTERNAL_ANALOG_INPUT(int index, double /*def*/)
 
 
 USER_DEFINED_FUNCTION_TYPE USER_DEFINED_FUNCTION[USER_DEFINED_FUNCTION_NUM]
-    = { 0 };
+    = { NULL };
 
 int USER_DEFINED_FUNCTION_ADD(USER_DEFINED_FUNCTION_TYPE func, int num)
 {

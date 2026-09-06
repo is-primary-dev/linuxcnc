@@ -19,7 +19,7 @@
 #include "libnml/nml/nml_type.hh"
 #include "motion_types.h"
 #include <stdint.h>
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 
 // Forward class declarations
 class EMC_JOINT_STAT;
@@ -387,6 +387,10 @@ extern int emcTrajUpdate(EMC_TRAJ_STAT * stat);
 extern int emcTrajSetJerk(double jerk);
 extern int emcTrajSetMaxJerk(double jerk);
 extern int emcTrajPlannerType(int type);
+extern int emcTrajSetScurvePeakScale(double scale);
+/* G64_R_PLANNER: [TRAJ]SMOOTH_PLANNER - planner a G64 R>0 request resolves to */
+extern int emcTrajSetSmoothPlanner(int type);
+extern int emcTrajGetSmoothPlanner(void);
 // implementation functions for EMC_MOTION aggregate types
 
 extern int emcMotionInit();
@@ -423,7 +427,7 @@ extern int emcSpindleAbort(int spindle);
 extern int emcSpindleSpeed(int spindle, double speed, double factor, double xoffset);
 extern int emcSpindleOn(int spindle, double speed, double factor, double xoffset,int wait_for_atspeed = 1);
 extern int emcSpindleOrient(int spindle, double orientation, int direction);
-extern int emcSpindleOff(int spindle);
+extern int emcSpindleOff(int spindle, int wait_for_atspeed = 0);
 extern int emcSpindleIncrease(int spindle);
 extern int emcSpindleDecrease(int spindle);
 extern int emcSpindleConstant(int spindle);

@@ -20,9 +20,9 @@
 #include "libnml/rcs/rcs.hh"
 #include "libnml/nml/cmd_msg.hh"
 #include "libnml/nml/stat_msg.hh"
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 #include "canon.hh"		// CANON_TOOL_TABLE, CANON_UNITS
-#include "rs274ngc/rs274ngc.hh"		// ACTIVE_G_CODES, etc
+#include "interp_codes.h"		// ACTIVE_G_CODES, etc
 
 // ------------------
 // CLASS DECLARATIONS
@@ -787,7 +787,9 @@ class EMC_TRAJ_SET_TERM_COND:public EMC_TRAJ_CMD_MSG {
     EMC_TRAJ_SET_TERM_COND()
       : EMC_TRAJ_CMD_MSG(EMC_TRAJ_SET_TERM_COND_TYPE, sizeof(EMC_TRAJ_SET_TERM_COND)),
         cond(false),
-        tolerance(0.0)
+        tolerance(0.0),
+        planner_type(-1),       /* G64_R_PLANNER: -1 = unchanged */
+        scurve_peak_scale(-1.0) /* G64_R_PLANNER: <0 = unchanged */
     {};
 
     // For internal NML/CMS use only.
@@ -798,6 +800,13 @@ class EMC_TRAJ_SET_TERM_COND:public EMC_TRAJ_CMD_MSG {
     int cond;
     double tolerance; // used to set the precision/tolerance of path deviation
 		      // during CONTINUOUS motion mode.
+    /* G64_R_PLANNER (fork extension): the optional G64 R word folds the planner
+     * request into the same control-mode message G64 already emits. -1 / <0
+     * means "not specified, leave unchanged". Applied in program order by task.
+     * planner_type carries INTENT, not an implementation: task resolves a
+     * smooth request (1) to the machine's [TRAJ]SMOOTH_PLANNER. */
+    int planner_type;        // 0 = trapezoidal, 1 = smooth (jerk-limited), -1 = unchanged
+    double scurve_peak_scale; // 0.1..1.0 cornering peak scale, <0 = unchanged
 };
 
 class EMC_TRAJ_SET_SPINDLESYNC:public EMC_TRAJ_CMD_MSG {
@@ -1629,7 +1638,7 @@ class EMC_TOOL_STAT:public EMC_TOOL_STAT_MSG {
     // Sub-class update() calls base-class update()
     // cppcheck-suppress duplInheritedMember
     void update(CMS * cms);
-    EMC_TOOL_STAT& operator =(const EMC_TOOL_STAT &s);	// need this for [] members
+    EMC_TOOL_STAT& operator =(const EMC_TOOL_STAT &) = delete; // No copy assignment
 
     int pocketPrepped;		// idx ready for loading from
     int toolInSpindle;		// tool loaded, 0 is no tool
@@ -1801,7 +1810,8 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
   public:
     EMC_SPINDLE_OFF()
       : EMC_SPINDLE_CMD_MSG(EMC_SPINDLE_OFF_TYPE, sizeof(EMC_SPINDLE_OFF)),
-        spindle(0)
+        spindle(0),
+        wait_for_spindle_at_speed(0)
     {};
 
     // For internal NML/CMS use only.
@@ -1810,6 +1820,7 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
     void update(CMS * cms);
 
     int spindle;    // the spindle to be turned off
+    int wait_for_spindle_at_speed; // wait for at-speed (spindle stopped) before next feed
 };
 
 class EMC_SPINDLE_INCREASE:public EMC_SPINDLE_CMD_MSG {

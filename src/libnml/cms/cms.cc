@@ -16,7 +16,6 @@
 * Last change:
 ********************************************************************/
 
-#include "libnml/rcs/rcsversion.h"
 
 #include <stdlib.h>		/* malloc(), free() */
 #include <stddef.h>		/* size_t */
@@ -26,7 +25,6 @@
 #include <errno.h>		/* errno, ERANGE */
 
 #include <string>
-#include <rtapi_string.h>
 #include "cms_cfg.hh"
 #include "cms.hh"		/* class CMS */
 #include "cms_up.hh"		/* class CMS_UPDATER */
@@ -134,7 +132,7 @@ CMS::CMS(long s)
     min_compatible_version = 0;
     confirm_write = 0;
     disable_final_write_raw_for_dma = 0;
-    subdiv_data = 0;
+    subdiv_data = NULL;
     enable_diagnostics = 0;
     dpi = NULL;
     di = NULL;
@@ -183,7 +181,7 @@ CMS::CMS(long s)
  /* 1 force this CMS object to be in server mode. */
 CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
 {
-    char *word[32]={0,};	/* Array of pointers to strings.  */
+    char *word[32]={NULL,};	/* Array of pointers to strings.  */
     char *buffer_type_name;	/* pointer to buffer type name from bufline */
     char *proc_type_name;	/* pointer to process type from procline */
     int i;
@@ -267,8 +265,8 @@ CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
     remote_port_type = CMS_NO_REMOTE_PORT_TYPE;
 
     /* Store the bufline and procline for debugging later. */
-    rtapi_strxcpy(BufferLine, bufline);
-    rtapi_strxcpy(ProcessLine, procline);
+    nml_strxcpy(BufferLine, bufline);
+    nml_strxcpy(ProcessLine, procline);
 
     /* Get parameters from the buffer's line in the config file. */
     if (separate_words(word, 9, bufline) != 9) {
@@ -280,7 +278,7 @@ CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
 
     /* Use the words from the buffer line to initialize some class variables. 
      */
-    rtapi_strxcpy(BufferName, word[1]);
+    nml_strxcpy(BufferName, word[1]);
     rcs_print_debug(PRINT_CMS_CONSTRUCTORS, "new CMS (%s)\n", BufferName);
 
     /* Clear errno so we can determine if all of the parameters in the */
@@ -290,9 +288,9 @@ CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
     }
     char *realname = cms_check_for_host_alias(word[3]);
     if (realname == NULL) {
-	rtapi_strxcpy(BufferHost, word[3]);
+	nml_strxcpy(BufferHost, word[3]);
     } else {
-	rtapi_strxcpy(BufferHost, realname);
+	nml_strxcpy(BufferHost, realname);
     }
 
     buffer_type_name = word[2];
@@ -452,8 +450,8 @@ CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
 	errno = 0;
     }
 
-    rtapi_strxcpy(ProcessName, word[1]);
-    rtapi_strxcpy(ProcessHost, word[4]);
+    nml_strxcpy(ProcessName, word[1]);
+    nml_strxcpy(ProcessHost, word[4]);
 
     /* Clear errno so we can determine if all of the parameters in the */
     /* buffer line were in an acceptable form. */
@@ -462,7 +460,7 @@ CMS::CMS(const char *bufline_in, const char *procline_in, int set_to_server)
     }
 
     proc_type_name = word[3];
-    rtapi_strxcpy(PermissionString, word[5]);
+    nml_strxcpy(PermissionString, word[5]);
     spawn_server = atoi(word[6]);
 
     /* Compute timeout. */

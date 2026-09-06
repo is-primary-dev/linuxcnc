@@ -80,6 +80,41 @@ extern int motion_num_spindles;
 
 static int rehomeAll;
 
+/* ===== BEGIN PLANNER_SWITCH_DEFER (reversible) =====================================
+ * Deferred PLANNER_TYPE switching. Switching 0<->1 mid-motion causes an acceleration
+ * discontinuity (the very thing the S-curve planner exists to avoid), so a switch
+ * requested while the coordinated TP queue is busy is LATCHED here and applied later,
+ * once motion is idle, by emcmotApplyPendingPlannerType() (called once per servo cycle
+ * from emcmotController()). It never aborts motion. When idle, the switch is instant.
+ * To revert this feature entirely: delete the three PLANNER_SWITCH_DEFER blocks in
+ * command.c, the declaration in mot_priv.h, and the call in control.c; then restore
+ * the original EMCMOT_SET_PLANNER_TYPE handler body (see ORIGINAL note in that block). */
+static int planner_type_switch_pending = 0;  /* 1 = a deferred switch is queued */
+static int planner_type_pending_value  = 0;   /* requested type (0/1), applied at idle */
+
+/* True when the coordinated trajectory queue is idle (safe to switch planner type). */
+static int planner_switch_motion_idle(void)
+{
+    return tpIsDone(&emcmotInternal->coord_tp)
+        && (tpQueueDepth(&emcmotInternal->coord_tp) == 0);
+}
+
+/* Apply a latched planner-type switch once motion has gone idle. Called every servo
+ * cycle from emcmotController(). No-op unless a switch is pending and the queue is idle. */
+void emcmotApplyPendingPlannerType(void)
+{
+    if (!planner_type_switch_pending) {
+        return;
+    }
+    if (planner_switch_motion_idle()) {
+        emcmotStatus->planner_type = planner_type_pending_value;
+        planner_type_switch_pending = 0;
+        rtapi_print_msg(RTAPI_MSG_INFO,
+            "planner switch applied (type %d)", planner_type_pending_value);
+    }
+}
+/* ===== END PLANNER_SWITCH_DEFER ==================================================== */
+
 /* limits_ok() returns 1 if none of the hard limits are set,
    0 if any are set. Called on a linear and circular move. */
 STATIC int limits_ok(void)
@@ -305,7 +340,7 @@ void emcmotSetRotaryUnlock(int jnum, int unlock) {
         jnum,1<<jnum);
         return;
     }
-    *(emcmot_hal_data->joint[jnum].unlock) = unlock;
+    hal_set_bool(emcmot_hal_data->joint[jnum].unlock, unlock);
 }
 
 int emcmotGetRotaryIsUnlocked(int jnum) {
@@ -320,7 +355,7 @@ int emcmotGetRotaryIsUnlocked(int jnum) {
         gave_message = 1;
         return 0;
     }
-    return *(emcmot_hal_data->joint[jnum].is_unlocked);
+    return hal_get_bool(emcmot_hal_data->joint[jnum].is_unlocked);
 }
 
 /*! \function emcmotDioWrite()
@@ -336,11 +371,7 @@ void emcmotDioWrite(int index, char value)
     if ((index >= emcmotConfig->numDIO) || (index < 0)) {
 	rtapi_print_msg(RTAPI_MSG_ERR, "ERROR: index out of range, %d not in [0..%d] (increase num_dio/EMCMOT_MAX_DIO=%d)\n", index, emcmotConfig->numDIO, EMCMOT_MAX_DIO);
     } else {
-	if (value != 0) {
-	    *(emcmot_hal_data->synch_do[index])=1;
-	} else {
-	    *(emcmot_hal_data->synch_do[index])=0;
-	}
+	hal_set_bool(emcmot_hal_data->synch_do[index], value != 0);
     }
 }
 
@@ -357,7 +388,7 @@ void emcmotAioWrite(int index, double value)
     if ((index >= emcmotConfig->numAIO) || (index < 0)) {
 	rtapi_print_msg(RTAPI_MSG_ERR, "ERROR: index out of range, %d not in [0..%d] (increase num_aio/EMCMOT_MAX_AIO=%d)\n", index, emcmotConfig->numAIO, EMCMOT_MAX_AIO);
     } else {
-        *(emcmot_hal_data->analog_output[index]) = value;
+        hal_set_real(emcmot_hal_data->analog_output[index], value);
     }
 }
 
@@ -507,6 +538,22 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 	    if (GET_MOTION_TELEOP_FLAG()) {
                 axis_jog_abort_all(0);
 	    } else if (GET_MOTION_COORD_FLAG()) {
+		/* If motion was being held waiting for spindle at-speed, the
+		   operator most likely aborted because the machine sat idle
+		   with no obvious reason. Tell them why, loudly. A wait that
+		   never released after a spindle stop almost always means
+		   spindle.N.at-speed is not wired, or does not go true once the
+		   spindle has actually stopped. */
+		if (MOTION_ID_VALID(emcmotInternal->coord_tp.spindle.waiting_for_atspeed)) {
+			for (spindle_num = 0; spindle_num < emcmotConfig->numSpindles; spindle_num++) {
+				if (emcmotStatus->spindle_status[spindle_num].state == 0 && !emcmotStatus->spindle_status[spindle_num].at_speed) {
+					reportError(_("Aborted while waiting for spindle %d at-speed after a spindle stop. "
+						"Check that spindle.%d.at-speed is connected and goes true once the spindle has stopped."),
+						spindle_num, spindle_num);
+					break;
+				}
+			}
+		}
 		tpAbort(&emcmotInternal->coord_tp);
 	    } else {
 		for (joint_num = 0; joint_num < ALL_JOINTS; joint_num++) {
@@ -530,15 +577,17 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 		SET_JOINT_FAULT_FLAG(joint, 0);
 	    }
 	    emcmotStatus->paused = 0;
+	    /* Drop any pending at-speed barrier so it can't strand a later move. */
+	    emcmotStatus->atspeed_next_feed = 0;
 	    // Clear pins on abort so tests see a clean state
 		if (emcmot_hal_data) {
-				*(emcmot_hal_data->interp_arc_radius) = 0.0;
-				*(emcmot_hal_data->interp_arc_center_x) = 0.0;
-				*(emcmot_hal_data->interp_arc_center_y) = 0.0;
-				*(emcmot_hal_data->interp_arc_center_z) = 0.0;
-				*(emcmot_hal_data->interp_straight_heading) = 0.0;
-				*(emcmot_hal_data->interp_normal_heading) = 0.0;
-				*(emcmot_hal_data->iscircle) = 0.0;
+				hal_set_real(emcmot_hal_data->interp_arc_radius, 0.0);
+				hal_set_real(emcmot_hal_data->interp_arc_center_x, 0.0);
+				hal_set_real(emcmot_hal_data->interp_arc_center_y, 0.0);
+				hal_set_real(emcmot_hal_data->interp_arc_center_z, 0.0);
+				hal_set_real(emcmot_hal_data->interp_straight_heading, 0.0);
+				hal_set_real(emcmot_hal_data->interp_normal_heading, 0.0);
+				hal_set_bool(emcmot_hal_data->iscircle, 0);
 		}
 	    break;
 
@@ -791,7 +840,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 		break;
 	    }
             // cannot jog if jog-inhibit is TRUE
-            if (*(emcmot_hal_data->jog_inhibit)){
+            if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                     reportError(_("Cannot jog while jog-inhibit is active."));
                 break;
             }
@@ -860,7 +909,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 		break;
 	    }
             // cannot jog if jog-inhibit is TRUE
-            if (*(emcmot_hal_data->jog_inhibit)){
+            if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                     reportError(_("Cannot jog while jog-inhibit is active."));
                 break;
             }
@@ -940,7 +989,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 		break;
 	    }
             // cannot jog if jog-inhibit is TRUE
-            if (*(emcmot_hal_data->jog_inhibit)){
+            if (hal_get_bool(emcmot_hal_data->jog_inhibit)){
                     reportError(_("Cannot jog while jog-inhibit is active."));
                 break;
             }
@@ -1203,16 +1252,63 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 
 	case EMCMOT_SET_PLANNER_TYPE:
 		/* set the type of planner: 0 = trapezoidal, 1 = S-curve */
-		/* can do it at any time */
+		/* ===== BEGIN PLANNER_SWITCH_DEFER (reversible) =====================
+		 * Apply instantly ONLY when motion is idle. During motion, latch the
+		 * request and let emcmotApplyPendingPlannerType() apply it at queue-idle
+		 * (never aborts). A one-shot WARN tells the operator it is pending.
+		 * ORIGINAL behaviour (applied immediately, "can do it at any time"):
+		 *     if (emcmotCommand->planner_type != 0 && emcmotCommand->planner_type != 1)
+		 *         emcmotStatus->planner_type = 0;
+		 *     else
+		 *         emcmotStatus->planner_type = emcmotCommand->planner_type;
+		 */
 		rtapi_print_msg(RTAPI_MSG_DBG, "SET_PLANNER_TYPE, type(%d)", emcmotCommand->planner_type);
-		// Only 0 and 1 are supported, set to 0 if invalid
-		if (emcmotCommand->planner_type != 0 && emcmotCommand->planner_type != 1) {
-			emcmotStatus->planner_type = 0;
+		{
+			/* Only 0 and 1 are supported; coerce anything else to 0. */
+			int req = (emcmotCommand->planner_type == 1) ? 1 : 0;
+			/* G64_R_PLANNER guard (parity with initraj/inihal, which force
+			 * type 0 when jerk is unset): refuse an S-curve request when no
+			 * valid TRAJ-level max jerk is configured, instead of entering a
+			 * degraded per-segment-fallback state. */
+			if (req == 1 && emcmotStatus->jerk < 1.0) {
+				reportError(_("S-curve planner refused: no usable jerk limit - set [TRAJ]MAX_LINEAR_JERK and per-axis [AXIS_*]MAX_JERK"));
+				break;
+			}
+			if (planner_switch_motion_idle()) {
+				/* idle: instant switch, drop any stale pending request */
+				emcmotStatus->planner_type = req;
+				planner_type_switch_pending = 0;
+			} else if (req != emcmotStatus->planner_type) {
+				/* moving: defer until the queue drains (never abort) */
+				planner_type_pending_value = req;
+				if (!planner_type_switch_pending) {
+					planner_type_switch_pending = 1;
+					/* operator-facing: reportError() surfaces in the GUI (unlike
+					 * rtapi_print_msg, which only hits the RTAPI log/terminal). */
+					reportError(_("planner switch deferred until queued motion completes (requested type %d)"), req);
+				}
+			} else {
+				/* request already equals current type: cancel any pending switch */
+				planner_type_switch_pending = 0;
+			}
+		}
+		/* ===== END PLANNER_SWITCH_DEFER ==================================== */
+		break;
+
+	case EMCMOT_SET_SCURVE_PEAK_SCALE:
+		/* S-curve rest-to-rest peak velocity scale: 0.5 = faithful (original
+		 * behaviour), 1.0 = physically-correct (full jerk-feasible cornering).
+		 * Runtime-tunable; clamp to a sane range. */
+		rtapi_print_msg(RTAPI_MSG_DBG, "SET_SCURVE_PEAK_SCALE, scale(%f)", emcmotCommand->scurve_peak_scale);
+		if (emcmotCommand->scurve_peak_scale < 0.1) {
+			emcmotStatus->scurve_peak_scale = 0.1;
+		} else if (emcmotCommand->scurve_peak_scale > 1.0) {
+			emcmotStatus->scurve_peak_scale = 1.0;
 		} else {
-			emcmotStatus->planner_type = emcmotCommand->planner_type;
+			emcmotStatus->scurve_peak_scale = emcmotCommand->scurve_peak_scale;
 		}
 		break;
-				
+
 	case EMCMOT_PAUSE:
 	    /* pause the motion */
 	    /* can happen at any time */
@@ -1355,7 +1451,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 	    /* set the emcmotInternal->enabling flag to defer enable until
 	       controller cycle */
 	    rtapi_print_msg(RTAPI_MSG_DBG, "ENABLE");
-	    if ( *(emcmot_hal_data->enable) == 0 ) {
+	    if ( !hal_get_bool(emcmot_hal_data->enable) ) {
 		reportError(_("can't enable motion, enable input is false"));
 	    } else {
 		emcmotInternal->enabling = 1;
@@ -1403,7 +1499,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 		reportError(_("must be in joint mode to home"));
 		return;
 	    }
-	    if (*(emcmot_hal_data->homing_inhibit)) {
+	    if (hal_get_bool(emcmot_hal_data->homing_inhibit)) {
 	        reportError(_("Homing denied by motion.homing-inhibit joint=%d\n"),
 	                   joint_num);
                 return;
@@ -1479,7 +1575,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 	    } else if (!(emcmotCommand->probe_type & 1)) {
                 // if suppress errors = off...
 
-                int probeval = !!*(emcmot_hal_data->probe_input);
+                int probeval = hal_get_bool(emcmot_hal_data->probe_input);
                 int probe_whenclears = !!(emcmotCommand->probe_type & 2);
 
                 if (probeval != probe_whenclears) {
@@ -1496,6 +1592,14 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
                 }
             }
 
+	    /* A probe is a feed-type move, so honor any pending at-speed
+	       barrier just like G1: wait for spindle.N.at-speed (spin-up after
+	       M3, or stop after M5) before the probe starts. */
+	    if (emcmotStatus->atspeed_next_feed) {
+		issue_atspeed = 1;
+		emcmotStatus->atspeed_next_feed = 0;
+	    }
+
 	    /* append it to the emcmotInternal->coord_tp */
 	    tpSetId(&emcmotInternal->coord_tp, emcmotCommand->id);
 	    if (-1 == tpAddLine(&emcmotInternal->coord_tp,
@@ -1506,7 +1610,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 				emcmotCommand->acc,
 				emcmotCommand->ini_maxjerk,
 				emcmotStatus->enables_new,
-				0,
+				issue_atspeed,
 				-1,
 				emcmotCommand->tag)) {
 		reportError(_("can't add probe move"));
@@ -1636,12 +1740,12 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
         }
         for (n = s0; n<=s1; n++){
 
-	        if (*(emcmot_hal_data->spindle[n].spindle_orient))
+	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_orient))
 	    	rtapi_print_msg(RTAPI_MSG_DBG, "SPINDLE_ORIENT cancelled by SPINDLE_ON\n");
-	        if (*(emcmot_hal_data->spindle[n].spindle_locked))
+	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_locked))
 		    rtapi_print_msg(RTAPI_MSG_DBG, "spindle-locked cleared by SPINDLE_ON\n");
-	        *(emcmot_hal_data->spindle[n].spindle_locked) = 0;
-	        *(emcmot_hal_data->spindle[n].spindle_orient) = 0;
+	        hal_set_bool(emcmot_hal_data->spindle[n].spindle_locked, 0);
+	        hal_set_bool(emcmot_hal_data->spindle[n].spindle_orient, 0);
 	        emcmotStatus->spindle_status[n].orient_state = EMCMOT_ORIENT_NONE;
 
 	        /* if (emcmotStatus->spindle.orient) { */
@@ -1693,15 +1797,19 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 	        emcmotStatus->spindle_status[n].speed = 0;
 	        emcmotStatus->spindle_status[n].direction = 0;
 	        emcmotStatus->spindle_status[n].brake = 1; // engage brake
-	        if (*(emcmot_hal_data->spindle[n].spindle_orient))
+	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_orient))
 		    rtapi_print_msg(RTAPI_MSG_DBG, "SPINDLE_ORIENT cancelled by SPINDLE_OFF");
-	        if (*(emcmot_hal_data->spindle[n].spindle_locked)){
+	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_locked)){
 		    rtapi_print_msg(RTAPI_MSG_DBG, "spindle-locked cleared by SPINDLE_OFF");
-	            *(emcmot_hal_data->spindle[n].spindle_locked) = 0;
+	            hal_set_bool(emcmot_hal_data->spindle[n].spindle_locked, 0);
             }
-	        *(emcmot_hal_data->spindle[n].spindle_orient) = 0;
+	        hal_set_bool(emcmot_hal_data->spindle[n].spindle_orient, 0);
 	        emcmotStatus->spindle_status[n].orient_state = EMCMOT_ORIENT_NONE;
         }
+        /* Optionally make the spindle stop an at-speed barrier: the next feed
+           move waits until at-speed reflects the stopped state. Safe when
+           unwired since at-speed defaults to 1 (see motion.c). */
+        emcmotStatus->atspeed_next_feed = emcmotCommand->wait_for_spindle_at_speed;
 	    break;
 
 	case EMCMOT_SPINDLE_ORIENT:
@@ -1724,7 +1832,7 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
                 rtapi_print_msg(RTAPI_MSG_ERR, "spindle number <%d> too high in M19",n);
                 break;
 	        }
-	        if (*(emcmot_hal_data->spindle[n].spindle_orient)) {
+	        if (hal_get_bool(emcmot_hal_data->spindle[n].spindle_orient)) {
 		    rtapi_print_msg(RTAPI_MSG_DBG, "orient already in progress");
 
 		    // mah:FIXME unsure whether this is ok or an error
@@ -1741,13 +1849,13 @@ void emcmotCommandHandler_locked(void *arg, long servo_period)
 
             // https://github.com/LinuxCNC/linuxcnc/issues/3389
             emcmotStatus->spindle_status[n].state = 0;
-            *(emcmot_hal_data->spindle[n].spindle_on) = 0;
+            hal_set_bool(emcmot_hal_data->spindle[n].spindle_on, 0);
             // https://github.com/LinuxCNC/linuxcnc/issues/3389
 
-	        *(emcmot_hal_data->spindle[n].spindle_orient_angle) = emcmotCommand->orientation;
-	        *(emcmot_hal_data->spindle[n].spindle_orient_mode) = emcmotCommand->mode;
-	        *(emcmot_hal_data->spindle[n].spindle_locked) = 0;
-	        *(emcmot_hal_data->spindle[n].spindle_orient) = 1;
+	        hal_set_real(emcmot_hal_data->spindle[n].spindle_orient_angle, emcmotCommand->orientation);
+	        hal_set_si32(emcmot_hal_data->spindle[n].spindle_orient_mode, emcmotCommand->mode);
+	        hal_set_bool(emcmot_hal_data->spindle[n].spindle_locked, 0);
+	        hal_set_bool(emcmot_hal_data->spindle[n].spindle_orient, 1);
 
 	        // mirror in spindle status
 	        emcmotStatus->spindle_status[n].orient_fault = 0; // this pin read during spindle-orient == 1

@@ -12,6 +12,7 @@
 *
 ********************************************************************/
 
+#include <stdio.h>
 #include <cmath>
 #include <float.h>		// DBL_MAX
 #include <string.h>		// memcpy() strncpy()
@@ -1189,6 +1190,37 @@ int emcTrajPlannerType(int type)
     return retval;
 }
 
+/* G64_R_PLANNER: which planner a G64 R>0 "smooth" request resolves to.
+ * Part programs carry intent only (R0 = trapezoidal, R>0 = jerk-limited);
+ * the machine names the implementation via [TRAJ]SMOOTH_PLANNER (initraj
+ * stores it here at startup). 0 = no smooth planner available, task then
+ * refuses R>0 with an operator error instead of switching. */
+static int smoothPlannerType = 1;
+
+int emcTrajSetSmoothPlanner(int type)
+{
+    smoothPlannerType = type;
+    return 0;
+}
+
+int emcTrajGetSmoothPlanner(void)
+{
+    return smoothPlannerType;
+}
+
+int emcTrajSetScurvePeakScale(double scale)
+{
+    emcmotCommand.command = EMCMOT_SET_SCURVE_PEAK_SCALE;
+    emcmotCommand.scurve_peak_scale = scale;
+
+    int retval = usrmotWriteEmcmotCommand(&emcmotCommand);
+
+    if (emc_debug & EMC_DEBUG_CONFIG) {
+        rcs_print("%s(%.4f) returned %d\n", __FUNCTION__, scale, retval);
+    }
+    return retval;
+}
+
 /*
   emcmot has no limits on max velocity, acceleration so we'll save them
   here and apply them in the functions above
@@ -1983,11 +2015,12 @@ int emcSpindleOn(int spindle, double speed, double css_factor, double offset, in
     return usrmotWriteEmcmotCommand(&emcmotCommand);
 }
 
-int emcSpindleOff(int spindle)
+int emcSpindleOff(int spindle, int wait_for_at_speed)
 {
     emcmotCommand.command = EMCMOT_SPINDLE_OFF;
     emcmotCommand.state = 0;
     emcmotCommand.spindle = spindle;
+    emcmotCommand.wait_for_spindle_at_speed = wait_for_at_speed;
     return usrmotWriteEmcmotCommand(&emcmotCommand);
 }
 
@@ -2072,10 +2105,16 @@ int emcMotionUpdate(EMC_MOTION_STAT * stat)
     }
     // read the emcmot error
     if (0 != usrmotReadEmcmotError(errorString)) {
-	// no error, so ignore
+        // no error, so ignore
     } else {
-	// an error to report
-	emcOperatorError("%s", errorString);
+        // an error to report
+        // Disable stdout print due to this error is from motion
+        // and already printed to stdout
+        // emcOperatorError() also forwards the error to the gui
+        RCS_PRINT_DESTINATION_TYPE prev_dest = get_rcs_print_destination();
+        set_rcs_print_destination(RCS_PRINT_TO_NULL);
+        emcOperatorError("%s", errorString);
+        set_rcs_print_destination(prev_dest);
     }
 
     // save the heartbeat and command number locally,

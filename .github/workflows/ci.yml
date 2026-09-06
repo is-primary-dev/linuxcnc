@@ -24,6 +24,7 @@ jobs:
 
   rip-and-test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
     - name: Dump GitHub context
       env:
@@ -47,16 +48,86 @@ jobs:
     - name: Verify no untracked or modified files after build
       run: |
         .github/scripts/verify-clean-repo.sh
+    - name: Arm core dumps
+      run: |
+        set -x
+        mkdir -p /tmp/linuxcnc-ui-smoke-cores
+        sudo sysctl -w kernel.core_pattern=/tmp/linuxcnc-ui-smoke-cores/core.%e.%p
     - name: Test
       run: |
         set -x
-        scripts/rip-environment runtests -p
+        scripts/rip-environment runtests -p -d
+    - name: Upload UI smoke screenshots
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ui-smoke-screenshots-gcc
+        path: |
+          tests/ui-smoke/**/screenshot.png
+          tests/ui-smoke/**/confirm.png
+          tests/ui-smoke/**/diff.png
+          tests/ui-smoke/**/diff-abs.png
+        if-no-files-found: ignore
+        retention-days: 14
+    - name: Verify no untracked or modified files after test
+      run: |
+        .github/scripts/verify-clean-repo.sh
+
+  rip-headless:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - name: Dump GitHub context
+      env:
+        GITHUB_CONTEXT: ${{ toJson(github) }}
+      run: |
+        echo Number of CPUs: $(nproc)
+        echo "$GITHUB_CONTEXT"
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+        fetch-depth: 1
+    - name: Install minimal headless dependencies
+      run: |
+        set -x
+        .github/scripts/install-deps-headless.sh
+    - name: Build RIP headless
+      run: |
+        set -x
+        .github/scripts/build-rip.sh --with-realtime=uspace --disable-gui --disable-manpages --disable-build-documentation
+    - name: Verify GUI artifacts are absent and headless artifacts exist
+      run: |
+        set -x
+        for f in bin/axis bin/axis-remote bin/touchy bin/gscreen bin/gmoccapy \
+                 bin/halshow bin/pyvcp bin/gladevcp bin/stepconf bin/pncconf \
+                 bin/image-to-gcode tcl/linuxcnc.so tcl/hal.so; do
+            if test -e "$f"; then
+                echo "error: GUI artifact built despite --disable-gui: $f"
+                exit 1
+            fi
+        done
+        for f in scripts/linuxcnc scripts/halrun bin/linuxcncrsh bin/linuxcncsvr \
+                 bin/halcmd bin/halui bin/mdi bin/linuxcnctop; do
+            if test ! -x "$f"; then
+                echo "error: missing headless artifact: $f"
+                exit 1
+            fi
+        done
+    - name: Verify no untracked or modified files after build
+      run: |
+        .github/scripts/verify-clean-repo.sh
+    - name: Test
+      run: |
+        set -x
+        scripts/rip-environment runtests -p ./tests
     - name: Verify no untracked or modified files after test
       run: |
         .github/scripts/verify-clean-repo.sh
 
   rip-rtai:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
     - name: Dump GitHub context
       env:
@@ -85,6 +156,7 @@ jobs:
 
   rip-and-test-clang:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
     - name: Dump GitHub context
       env:
@@ -108,16 +180,34 @@ jobs:
     - name: Verify no untracked or modified files after build
       run: |
         .github/scripts/verify-clean-repo.sh
+    - name: Arm core dumps
+      run: |
+        set -x
+        mkdir -p /tmp/linuxcnc-ui-smoke-cores
+        sudo sysctl -w kernel.core_pattern=/tmp/linuxcnc-ui-smoke-cores/core.%e.%p
     - name: Test
       run: |
         set -x
-        scripts/rip-environment runtests -p
+        scripts/rip-environment runtests -p -d
+    - name: Upload UI smoke screenshots
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ui-smoke-screenshots-clang
+        path: |
+          tests/ui-smoke/**/screenshot.png
+          tests/ui-smoke/**/confirm.png
+          tests/ui-smoke/**/diff.png
+          tests/ui-smoke/**/diff-abs.png
+        if-no-files-found: ignore
+        retention-days: 14
     - name: Verify no untracked or modified files after test
       run: |
         .github/scripts/verify-clean-repo.sh
 
   cppcheck:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6
@@ -127,20 +217,40 @@ jobs:
     - name: Install dependencies
       run: |
         set -x
+        .github/scripts/use-main-ubuntu-mirror.sh
         sudo apt-get -q update
-        sudo apt-get --yes install cppcheck shellcheck
+        sudo apt-get --yes install cppcheck
     - name: Cppcheck
-      continue-on-error: true
       run: |
         set -x
         scripts/cppcheck.sh
-    - name: Shellcheck
-      continue-on-error: true
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v6
+      with:
+        submodules: false
+        fetch-depth: 1
+    - name: Install dependencies
       run: |
+        set -x
+        .github/scripts/install-deps.sh
+        sudo apt-get --yes install shellcheck
+    - name: Configure
+      run: |
+        set -x
+        .github/scripts/configure.sh
+    - name: Shellcheck
+      run: |
+        set -x
         scripts/shellcheck.sh
 
   htmldocs:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
     - name: Dump GitHub context
       env:
@@ -161,27 +271,57 @@ jobs:
       run: |
         set -x
         .github/scripts/build-doc.sh
+    - name: Check manpage names match filenames
+      run: scripts/manpage-name-check.py --enforce docs/build/man
+    - name: Check for derived-id section references
+      run: scripts/docs-anchor-check.py --enforce
     - name: Verify no untracked or modified files after build
       run: |
         #*.po and documentation.pot are modifyed by build. Ignore them for now.
         .github/scripts/verify-clean-repo.sh ':(exclude)docs/po/*.po' ':(exclude)docs/po/documentation.pot'
+    - name: HTML checks
+      run: |
+        set -x
+        #-w sets warn only, remove to generate a CI failure on error
+        scripts/htmlcheck.sh -w
+    - name: Tar linuxcnc-doc
+      run: |
+        set -x
+        tar -czf linuxcnc-doc.tar.gz -C docs/build html
+    - name: Upload linuxcnc-doc artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: linuxcnc-doc
+        archive: false
+        path: linuxcnc-doc.tar.gz
+        if-no-files-found: error
 
   package-arch:
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
     strategy:
       matrix:
         runner: ["ubuntu-24.04", "ubuntu-24.04-arm"]
         image: ["debian:bookworm", "debian:trixie", "debian:sid"]
+        include:
+          - allow_fail: False
+            image: debian:bookworm
+          - allow_fail: False
+            image: debian:trixie
+          - allow_fail: True
+            image: debian:sid
     container:
       image: ${{ matrix.image }}
       # IPC_OWNER is needed for shmget IPC_CREAT
       # SYS_ADMIN is needed for shmctl IPC_SET
       options: --cap-add=IPC_OWNER --cap-add=SYS_ADMIN
+    continue-on-error: ${{ matrix.allow_fail }}
     steps:
     - name: Dump GitHub context
       env:
         GITHUB_CONTEXT: ${{ toJson(github) }}
       run: |
+        echo Allow failure: ${{ matrix.allow_fail }}
         echo Number of CPUs: $(nproc)
         echo "$GITHUB_CONTEXT"
     - name: Install pre-dependencies
@@ -223,7 +363,7 @@ jobs:
         passwd -d testrunner
         adduser testrunner sudo
         chmod 0777 $(find tests/ -type d) # make test dirs world-writable for the testrunner
-        su -c "./scripts/runtests -p ./tests" testrunner
+        su -c "./scripts/runtests -p -d ./tests" testrunner
     - name: Verify no untracked or modified files after test
       run: |
         .github/scripts/verify-clean-repo.sh ':(exclude)VERSION' ':(exclude)debian/changelog'
@@ -252,19 +392,29 @@ jobs:
 
   package-indep:
     runs-on: ubuntu-24.04
+    timeout-minutes: 75
     strategy:
       matrix:
         image: ["debian:bookworm", "debian:trixie", "debian:sid"]
+        include:
+        - allow_fail: False
+          image: debian:bookworm
+        - allow_fail: False
+          image: debian:trixie
+        - allow_fail: True
+          image: debian:sid
     container:
       image: ${{ matrix.image }}
       # IPC_OWNER is needed for shmget IPC_CREAT
       # SYS_ADMIN is needed for shmctl IPC_SET
       options: --cap-add=IPC_OWNER --cap-add=SYS_ADMIN
+    continue-on-error: ${{ matrix.allow_fail }}
     steps:
     - name: Dump GitHub context
       env:
         GITHUB_CONTEXT: ${{ toJson(github) }}
       run: |
+        echo Allow failure: ${{ matrix.allow_fail }}
         echo Number of CPUs: $(nproc)
         echo "$GITHUB_CONTEXT"
     - name: Install pre-dependencies

@@ -22,10 +22,8 @@
 
 // Include command and status message definitions
 #include "canon.hh"
-#include "canon_position.hh"
 #include "emc.hh"
 #include "emc_nml.hh"
-#include "emcglb.h"
 #include "emcpos.h"
 #include "libnml/cms/cms.hh"
 
@@ -734,6 +732,7 @@ void EMC_SPINDLE_OFF::update(CMS * cms)
 {
     EMC_SPINDLE_CMD_MSG::update(cms);
     cms->update(spindle);
+    cms->update(wait_for_spindle_at_speed);
 }
 
 /*
@@ -1106,6 +1105,8 @@ void EMC_TRAJ_SET_TERM_COND::update(CMS * cms)
     EMC_TRAJ_CMD_MSG::update(cms);
     cms->update(cond);
     cms->update(tolerance);
+    cms->update(planner_type);       /* G64_R_PLANNER: append at end of serialization */
+    cms->update(scurve_peak_scale);  /* G64_R_PLANNER */
 }
 
 // cppcheck-suppress duplInheritedMember

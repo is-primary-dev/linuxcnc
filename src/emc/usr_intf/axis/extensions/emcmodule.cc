@@ -18,6 +18,8 @@
 //    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #define PY_SSIZE_T_CLEAN
+#include <stdio.h>
+#include <stdlib.h>
 #include <Python.h>
 #include <structseq.h>
 #include <pthread.h>
@@ -26,6 +28,7 @@
 #include "libnml/rcs/rcs.hh"
 #include "nml_intf/emc.hh"
 #include "nml_intf/emc_nml.hh"
+#include "nml_intf/debugflags.h"
 #include <kinematics.h>
 #include "config.h"
 #include <inifile.hh>
@@ -39,8 +42,6 @@
 
 #include <cmath>
 
-#include <epoxy/gl.h>
-#include <epoxy/glx.h>
 #include <algorithm>
 
 using namespace linuxcnc;
@@ -117,7 +118,7 @@ static int Ini_init(pyIniFile *self, PyObject *a, PyObject * /*k*/) {
 }
 
 //
-// PyBool linuxcnc.ini.hasvariable(string:section, string:variable)
+// PyBool linuxcnc.ini.hasvariable(string:section, string:variable [, int:num])
 //
 // Find [section]variable and return true if found. The 'section' may be an
 // empty string and the first occurrence of 'variable' in any section is
@@ -125,9 +126,9 @@ static int Ini_init(pyIniFile *self, PyObject *a, PyObject * /*k*/) {
 //
 static PyObject *Ini_has_variable(pyIniFile *self, PyObject *args)
 {
-    const char *sect = "", *var;
+    const char *sect, *var;
     int num = 1;
-    if(!PyArg_ParseTuple(args, "s|si:hasvariable", &sect, &var, &num))
+    if(!PyArg_ParseTuple(args, "ss|i:hasvariable", &sect, &var, &num))
         return NULL;
 
     IniFile ini(self->inifile);
@@ -718,10 +719,12 @@ static PyMethodDef Ini_methods[] = {
         "Returns a boolean indicating whether or not the given section was found "
         "in the ini-file." },
     {"hasvariable", (PyCFunction)Ini_has_variable, METH_VARARGS,
-        "PyBool hasvariable(section, variable)\n"
+        "PyBool hasvariable(section, variable [, num])\n"
         "Returns a boolean indicating whether or not the given [section]variable "
         "was found in the ini-file. The first occurrence of the variable name will "
-        "be searched if the section name is empty." },
+        "be searched if the section name is empty. The optional num argument may "
+        "be used to test whether the num'th variable of that name exists in the "
+        "section." },
     {"getbool", (PyCFunction)Ini_get_bool, METH_VARARGS|METH_KEYWORDS,
         "PyBool|None getbool(section, variable [, num] [, fallback=])\n"
         "Returns the value of the variable converted to boolean if it was a valid "
@@ -852,6 +855,8 @@ static const char linuxcncinidoc[] =
     "Method documentation is provided with each method.\n"
     ;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 static PyTypeObject Ini_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "linuxcnc.ini",              /*tp_name*/
@@ -912,6 +917,7 @@ static PyTypeObject Ini_Type = {
 #endif
 #endif
 };
+#pragma GCC diagnostic pop
 
 #define EMC_COMMAND_TIMEOUT 5.0  // how long to wait until timeout
 #define EMC_COMMAND_DELAY   0.01 // how long to sleep between checks
@@ -1567,6 +1573,8 @@ static PyGetSetDef Stat_getsetlist[] = {
     {}
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 static PyTypeObject Stat_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "linuxcnc.stat",             /*tp_name*/
@@ -1627,6 +1635,7 @@ static PyTypeObject Stat_Type = {
 #endif
 #endif
 };
+#pragma GCC diagnostic pop
 
 static int Command_init(pyCommandChannel *self, PyObject * /*a*/, PyObject * /*k*/) {
     const char *file = get_nmlfile();
@@ -2364,6 +2373,8 @@ static PyMethodDef Command_methods[] = {
     {}
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 static PyTypeObject Command_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "linuxcnc.command",          /*tp_name*/
@@ -2424,6 +2435,7 @@ static PyTypeObject Command_Type = {
 #endif
 #endif
 };
+#pragma GCC diagnostic pop
 
 static int Error_init(pyErrorChannel *self, PyObject * /*a*/, PyObject * /*k*/) {
     const char *file = get_nmlfile();
@@ -2489,6 +2501,8 @@ static PyMethodDef Error_methods[] = {
     {}
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 static PyTypeObject Error_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "linuxcnc.error_channel",    /*tp_name*/
@@ -2549,6 +2563,7 @@ static PyTypeObject Error_Type = {
 #endif
 #endif
 };
+#pragma GCC diagnostic pop
 
 #define AXIS_MASK_A 0x08
 #define AXIS_MASK_B 0x10
@@ -2645,58 +2660,12 @@ static void vertex9(const double pt[9], double p[3], const char *geometry) {
     }
 }
 
-static void glvertex9(const double pt[9], const char *geometry) {
-    double p[3];
-    vertex9(pt, p, geometry);
-    glVertex3dv(p);
-}
-
-static void line9(const double p1[9], const double p2[9], const char *geometry) {
-    if(p1[3] != p2[3] || p1[4] != p2[4] || p1[5] != p2[5]) {
-        double dc = std::max({
-            fabs(p2[3] - p1[3]),
-            fabs(p2[4] - p1[4]),
-            fabs(p2[5] - p1[5])});
-        int st = (int)ceil(std::max(10.0, dc/10));
-        int i;
-
-        for(i=1; i<=st; i++) {
-            double t = i * 1.0 / st;
-            double v = 1.0 - t;
-            double pt[9];
-            for(int j=0; j<9; j++) { pt[j] = t * p2[j] + v * p1[j]; }
-            glvertex9(pt, geometry);
-        }
-    } else {
-        glvertex9(p2, geometry);
-    }
-}
-
-static void line9b(const double p1[9], const double p2[9], const char *geometry) {
-    glvertex9(p1, geometry);
-    if(p1[3] != p2[3] || p1[4] != p2[4] || p1[5] != p2[5]) {
-        double dc = std::max({
-            fabs(p2[3] - p1[3]),
-            fabs(p2[4] - p1[4]),
-            fabs(p2[5] - p1[5])});
-        int st = (int)ceil(std::max(10.0, dc/10));
-        int i;
-
-        for(i=1; i<=st; i++) {
-            double t = i * 1.0 / st;
-            double v = 1.0 - t;
-            double pt[9];
-            for(int j=0; j<9; j++) { pt[j] = t * p2[j] + v * p1[j]; }
-            glvertex9(pt, geometry);
-            if(i != st)
-                glvertex9(pt, geometry);
-        }
-    } else {
-        glvertex9(p2, geometry);
-    }
-}
-
+// Retired: this emitted immediate-mode OpenGL vertices, which the 3.3 core
+// profile used for preview rendering does not have.  The name, signature,
+// argument checking, and return value are kept for out-of-tree callers; it no
+// longer draws.  Replacement: rs274.glcanon_scene.
 static PyObject *pyline9(PyObject * /*s*/, PyObject *o) {
+    static bool warned = false;
     double pt1[9], pt2[9];
     const char *geometry;
 
@@ -2710,7 +2679,13 @@ static PyObject *pyline9(PyObject * /*s*/, PyObject *o) {
             &pt2[6], &pt2[7], &pt2[8]))
         return NULL;
 
-    line9b(pt1, pt2, geometry);
+    if(!warned) {
+        warned = true;
+        if(PyErr_WarnEx(PyExc_DeprecationWarning,
+                    "linuxcnc.line9() no longer draws; use rs274.glcanon_scene",
+                    1) < 0)
+            return NULL;
+    }
 
     Py_RETURN_NONE;
 }
@@ -2754,13 +2729,17 @@ static PyObject *pygui_rot_offsets(PyObject * /*s*/, PyObject *o) {
     return Py_None;
 }
 
+// Retired: this drew with immediate-mode OpenGL (glBegin/glVertex*/glEnd),
+// invalid in the 3.3 core profile now used for preview rendering.  The name,
+// signature, argument checking, and return value are kept for out-of-tree
+// callers; it no longer draws.  Replacement: rs274.glcanon_scene.
 static PyObject *pydraw_lines(PyObject * /*s*/, PyObject *o) {
+    static bool warned = false;
     PyListObject *li;
     int for_selection = 0;
     int i;
-    int first = 1;
-    int nl = -1, n;
-    double p1[9], p2[9], pl[9];
+    int n;
+    double p1[9], p2[9];
     char *geometry;
 
     if(!PyArg_ParseTuple(o, "sO!|i:draw_lines",
@@ -2777,47 +2756,35 @@ static PyObject *pydraw_lines(PyObject * /*s*/, PyObject *o) {
                     p2+0, p2+1, p2+2,
                     p2+3, p2+4, p2+5,
                     p2+6, p2+7, p2+8,
-                    &dummy1, &dummy2, &dummy3)) {
-            if(!first) glEnd();
+                    &dummy1, &dummy2, &dummy3))
             return NULL;
-        }
-
-        // Suppress cppcheck false positive:
-        // 'first' == 1 when 'pl' is undefined and therefore not a problem.
-        // cppcheck-suppress uninitvar
-        if(first || memcmp(p1, pl, sizeof(p1))
-                || (for_selection && n != nl)) {
-            if(!first) glEnd();
-            if(for_selection && n != nl) {
-                glLoadName(n);
-                nl = n;
-            }
-            glBegin(GL_LINE_STRIP);
-            glvertex9(p1, geometry);
-            first = 0;
-        }
-        line9(p1, p2, geometry);
-        memcpy(pl, p2, sizeof(p1));
     }
 
-    if(!first) glEnd();
+    if(!warned) {
+        warned = true;
+        if(PyErr_WarnEx(PyExc_DeprecationWarning,
+                    "linuxcnc.draw_lines() no longer draws; use rs274.glcanon_scene",
+                    1) < 0)
+            return NULL;
+    }
 
     Py_INCREF(Py_None);
     return Py_None;
 }
 
+// Retired: this drew with immediate-mode OpenGL (glBegin/glVertex*/glEnd),
+// invalid in the 3.3 core profile now used for preview rendering.  The name,
+// signature, argument checking, and return value are kept for out-of-tree
+// callers; it no longer draws.  Replacement: rs274.glcanon_scene.
 static PyObject *pydraw_dwells(PyObject * /*s*/, PyObject *o) {
+    static bool warned = false;
     PyListObject *li;
     int for_selection = 0, is_lathe = 0, i, n;
     double alpha;
     char *geometry;
-    double delta = 0.015625;
 
     if(!PyArg_ParseTuple(o, "sO!dii:draw_dwells", &geometry, &PyList_Type, &li, &alpha, &for_selection, &is_lathe))
         return NULL;
-
-    if (for_selection == 0)
-        glBegin(GL_LINES);
 
     for(i=0; i<PyList_GET_SIZE(li); i++) {
         PyObject *it = PyList_GET_ITEM(li, i);
@@ -2826,52 +2793,15 @@ static PyObject *pydraw_dwells(PyObject * /*s*/, PyObject *o) {
         if(!PyArg_ParseTuple(it, "i(ddd)dddi", &n, &red, &green, &blue, &x, &y, &z, &axis)) {
             return NULL;
         }
-        if (for_selection != 1)
-            glColor4d(red, green, blue, alpha);
-        if (for_selection == 1) {
-            glLoadName(n);
-            glBegin(GL_LINES);
-        }
-        if (is_lathe == 1)
-            axis = 1;
-
-        if (axis == 0) {
-            glVertex3f(x-delta,y-delta,z);
-            glVertex3f(x+delta,y+delta,z);
-            glVertex3f(x-delta,y+delta,z);
-            glVertex3f(x+delta,y-delta,z);
-
-            glVertex3f(x+delta,y+delta,z);
-            glVertex3f(x-delta,y-delta,z);
-            glVertex3f(x+delta,y-delta,z);
-            glVertex3f(x-delta,y+delta,z);
-        } else if (axis == 1) {
-            glVertex3f(x-delta,y,z-delta);
-            glVertex3f(x+delta,y,z+delta);
-            glVertex3f(x-delta,y,z+delta);
-            glVertex3f(x+delta,y,z-delta);
-
-            glVertex3f(x+delta,y,z+delta);
-            glVertex3f(x-delta,y,z-delta);
-            glVertex3f(x+delta,y,z-delta);
-            glVertex3f(x-delta,y,z+delta);
-        } else {
-            glVertex3f(x,y-delta,z-delta);
-            glVertex3f(x,y+delta,z+delta);
-            glVertex3f(x,y+delta,z-delta);
-            glVertex3f(x,y-delta,z+delta);
-
-            glVertex3f(x,y+delta,z+delta);
-            glVertex3f(x,y-delta,z-delta);
-            glVertex3f(x,y-delta,z+delta);
-            glVertex3f(x,y+delta,z-delta);
-        }
-        if (for_selection == 1)
-            glEnd();
     }
 
-    if (for_selection == 0)
-        glEnd();
+    if(!warned) {
+        warned = true;
+        if(PyErr_WarnEx(PyExc_DeprecationWarning,
+                    "linuxcnc.draw_dwells() no longer draws; use rs274.glcanon_scene",
+                    1) < 0)
+            return NULL;
+    }
 
     Py_INCREF(Py_None);
     return Py_None;
@@ -2935,7 +2865,7 @@ static int Logger_init(pyPositionLogger *self, PyObject *a, PyObject * /*k*/) {
     self->npts = self->mpts = 0;
     self->exit = self->clear = 0;
     self->changed = 1;
-    self->st = 0;
+    self->st = NULL;
     self->is_xyuv = 0;
     self->foam_z = 0;
     self->foam_w = 1.5;  // temporarily hard-code
@@ -3145,35 +3075,20 @@ static PyObject* Logger_stop(pyPositionLogger *s, PyObject * /*o*/) {
     return Py_None;
 }
 
-static PyObject* Logger_call(pyPositionLogger *s, PyObject * /*o*/) {
-    if(!s->clear) {
-        LOCK();
-        if(s->is_xyuv) {
-            if(s->changed) {
-                glVertexPointer(3, GL_FLOAT,
-                        sizeof(struct logger_point)/2, &s->p->x);
-                glColorPointer(4, GL_UNSIGNED_BYTE,
-                        sizeof(struct logger_point)/2, &s->p->c);
-                glEnableClientState(GL_COLOR_ARRAY);
-                glEnableClientState(GL_VERTEX_ARRAY);
-                s->changed = 0;
-            }
-            s->lpts = s->npts;
-            glDrawArrays(GL_LINES, 0, 2*s->npts);
-        } else {
-            if(s->changed) {
-                glVertexPointer(3, GL_FLOAT,
-                        sizeof(struct logger_point), &s->p->x);
-                glColorPointer(4, GL_UNSIGNED_BYTE,
-                        sizeof(struct logger_point), &s->p->c);
-                glEnableClientState(GL_COLOR_ARRAY);
-                glEnableClientState(GL_VERTEX_ARRAY);
-                s->changed = 0;
-            }
-            s->lpts = s->npts;
-            glDrawArrays(GL_LINE_STRIP, 0, s->npts);
-        }
-        UNLOCK();
+// Retired: this plotted the backplot through the fixed-function client-state
+// vertex arrays (glVertexPointer/glColorPointer/glDrawArrays), which the 3.3
+// core profile does not have.  The name and return value are kept for
+// out-of-tree callers; it no longer draws.  Replacement: points(), which hands
+// the same buffer to the core renderer for VBO upload — and which advances
+// lpts, so the tool marker still tracks the plotted line.
+static PyObject* Logger_call(pyPositionLogger * /*s*/, PyObject * /*o*/) {
+    static bool warned = false;
+    if(!warned) {
+        warned = true;
+        if(PyErr_WarnEx(PyExc_DeprecationWarning,
+                    "positionlogger.call() no longer draws; use positionlogger.points()",
+                    1) < 0)
+            return NULL;
     }
     Py_INCREF(Py_None);
     return Py_None;
@@ -3202,6 +3117,31 @@ static PyObject *Logger_last(pyPositionLogger *s, PyObject *o) {
     return result;
 }
 
+// Additive accessor for the OpenGL 3.3 core renderer: hand Python a private
+// copy of the logged-point ring buffer so it can upload changed ranges to a
+// VBO, instead of the deprecated immediate-mode Logger_call. The copy is taken
+// under the same lock that guards realloc/memmove of s->p in the sampler
+// thread. Returns (bytes, npts, is_xyuv); each point is a `struct logger_point`
+// (see the matching numpy dtype in rs274.glcanon_bake.LOGGER_DTYPE).
+//
+// This is the core renderer's draw-time handoff of the plotted points, so it
+// advances lpts to npts exactly as Logger_call did. Logger_last(flag=1) reads
+// lpts to report the last *drawn* point (used to position the tool marker so it
+// stays in sync with the plotted line); without this, lpts stays 0 and the tool
+// marker snaps to the origin whenever the live plot is shown.
+static PyObject *Logger_get_points(pyPositionLogger *s, PyObject * /*o*/) {
+    LOCK();
+    int npts = s->npts;
+    if(npts < 0) npts = 0;
+    Py_ssize_t nbytes = (Py_ssize_t)npts * (Py_ssize_t)sizeof(struct logger_point);
+    PyObject *buf = PyBytes_FromStringAndSize((const char*)s->p, nbytes);
+    int is_xyuv = s->is_xyuv;
+    s->lpts = s->npts;
+    UNLOCK();
+    if(!buf) return NULL;
+    return Py_BuildValue("Nii", buf, npts, is_xyuv);
+}
+
 static PyMemberDef Logger_members[] = {
     {(char*)"npts", T_INT, offsetof(pyPositionLogger, npts), READONLY, NULL},
     {},
@@ -3216,6 +3156,9 @@ static PyMethodDef Logger_methods[] = {
         "Stop the position logger"},
     {"call", (PyCFunction)Logger_call, METH_NOARGS,
         "Plot the backplot now"},
+    {"points", (PyCFunction)Logger_get_points, METH_NOARGS,
+        "Return (bytes, npts, is_xyuv): a copy of the logged point buffer for "
+        "VBO upload by the core renderer"},
     {"set_depth", (PyCFunction)Logger_set_depth, METH_VARARGS,
         "set the Z and W depths for foam cutter"},
     {"set_colors", (PyCFunction)Logger_set_colors, METH_VARARGS,
@@ -3227,6 +3170,8 @@ static PyMethodDef Logger_methods[] = {
     {},
 };
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 static PyTypeObject PositionLoggerType = {
     PyVarObject_HEAD_INIT(NULL, 0)
     "linuxcnc.positionlogger",   /*tp_name*/
@@ -3287,12 +3232,13 @@ static PyTypeObject PositionLoggerType = {
 #endif
 #endif
 };
+#pragma GCC diagnostic pop
 
 static PyMethodDef emc_methods[] = {
 #define METH(name, doc) { #name, (PyCFunction) py##name, METH_VARARGS, doc }
-METH(draw_lines, "Draw a bunch of lines in the 'rs274.glcanon' format"),
-METH(draw_dwells, "Draw a bunch of dwell positions in the 'rs274.glcanon' format"),
-METH(line9, "Draw a single line in the 'rs274.glcanon' format; assumes glBegin(GL_LINES)"),
+METH(draw_lines, "Retired: no longer draws, use rs274.glcanon_scene"),
+METH(draw_dwells, "Retired: no longer draws, use rs274.glcanon_scene"),
+METH(line9, "Retired: no longer draws, use rs274.glcanon_scene"),
 METH(vertex9, "Get the 3d location for a 9d point"),
 METH(gui_rot_offsets, "Set x,y,z offsets for A,B,C rotations"),
 METH(gui_respect_offsets, "Enable rotations about g5x,g92 offsets"),

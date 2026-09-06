@@ -63,7 +63,8 @@ using namespace linuxcnc;
 // Maximum wait time in WAIT_HEARTBEAT to see real-time move along
 #define WAIT_HEARTBEAT_TIMEOUT 1.0
 
-// Maximum number of heartbeats to wait for EMC_TASK_STATE to change
+// Maximum number of heartbeats to wait for the motion controller to catch
+// up and reflect a requested state change in the status
 #define WAIT_TASK_STATE_CHANGE_MAX 25
 
 typedef enum { cmdUnknown, cmdHello, cmdSet, cmdGet, cmdQuit, cmdShutdown, cmdHelp } cmdType;
@@ -184,6 +185,7 @@ typedef struct {
 	int commProt;					// Deprecated
 } connectionRecType;
 
+static bool isipv4 = false;	// We try AF_INET6, but can fallback to AF_INET
 static int port = 5007;
 static std::string helloPwd = "EMC";
 static std::string enablePWD = "EMCTOO";
@@ -261,6 +263,7 @@ static struct option longopts[] = {
 	{"enablepw",  1, NULL, 'e'},
 	{"path",      1, NULL, 'd'},
 	{"quiet",     0, NULL, 'q'},
+	{"ipv4",      0, NULL, '4'},
 	{}
 };
 
@@ -363,24 +366,66 @@ static void set_nonblock(int fd)
 	}
 }
 
+static int getSocket4(struct sockaddr_in &addr, socklen_t &slen)
+{
+	int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	if (sockfd < 0) {
+		xperror("IPv4 socket()");
+		return -1;
+	}
+	addr = {};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons(port);
+	slen = sizeof(addr);
+	return sockfd;
+}
+
 static int initSocket()
 {
 	int optval = 1;
 	int err;
 	int sockfd;
-	struct sockaddr_in6 address = {};
+	union {
+		struct sockaddr_in6 addr6;
+		struct sockaddr_in  addr4;
+	} addr;
+	socklen_t slen;
 
-	sockfd = socket(AF_INET6, SOCK_STREAM, 0);
-	if (sockfd < 0) {
-		xperror("socket()");
-		return -1;
+	if (isipv4) {
+		// Forced IPv4, set from command-line
+		if ((sockfd = getSocket4(addr.addr4, slen)) < 0)
+			return -1;
+	} else {
+		// Using AF_INET6 will also allow IPv4 to connect (v4-mapped-on-v6)
+		// We will try IPv6 first and hope it is available
+		sockfd = socket(AF_INET6, SOCK_STREAM, 0);
+		if (sockfd < 0) {
+			if (EAFNOSUPPORT == errno) {
+				// Someone disabled IPv6 on the machine. Try IPv4 instead.
+				isipv4 = true;
+				if ((sockfd = getSocket4(addr.addr4, slen)) < 0)
+					return -1;
+			} else {
+				xperror("IPv6 socket()");
+				return -1;
+			}
+		} else {
+			// Ensure that v4-mapped-on-v6 is enabled. In theory, it could fail if
+			// there is no IPv4 stack available, but we don't care in that case.
+			int zero = 0;
+			setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+
+			addr.addr6 = {};
+			addr.addr6.sin6_family = AF_INET6;
+			addr.addr6.sin6_addr = IN6ADDR_ANY_INIT;
+			addr.addr6.sin6_port = htons(port);
+			slen = sizeof(addr.addr6);
+		}
 	}
+
 	setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval));
-	// Using AF_INET6 will also allow IPv4 to connect (v4-mapped-on-v6)
-	address.sin6_family = AF_INET6;
-	address.sin6_addr = IN6ADDR_ANY_INIT;
-	address.sin6_port = htons(port);
-	err = bind(sockfd, reinterpret_cast<struct sockaddr *>(&address), sizeof(address));
+	err = bind(sockfd, reinterpret_cast<struct sockaddr *>(&addr), slen);
 	if (err) {
 		close(sockfd);
 		xperror("bind()");
@@ -485,7 +530,7 @@ static std::optional<std::string> getIniVar(const std::string &var, const std::s
 {
 	IniFile inifile(emc_inifile);
 	if(!inifile)
-		return nullptr;
+		return std::nullopt;
 
 	return inifile.findString(var, section);
 }
@@ -875,8 +920,23 @@ static cmdResponseType setJointWaitHomed(connectionRecType &ctx)
 		return rtError;
 	}
 	if (joint >= 0 && !emcStatus->motion.joint[joint].homing && !emcStatus->motion.joint[joint].homed) {
-		errornl(ctx, fmt::format("Joint '{}' is not homed and not in the process of homing.", joint));
-		return rtError;
+		// The motion controller needs a servo-thread run to raise the
+		// homing flag after a 'SET JOINT_HOME' was acknowledged.
+		for (unsigned toc = 0; toc < WAIT_TASK_STATE_CHANGE_MAX; toc++) {
+			updateStatus(); // Get fresh value about joint status
+			if (emcStatus->motion.joint[joint].homing || emcStatus->motion.joint[joint].homed)
+				break;
+			// Wait for the motion control to run
+			if (rtOk != doWaitHeartbeat(ctx, 1, WAIT_HEARTBEAT_TIMEOUT)) {
+				// Bad sign,... can't wait for a heartbeat
+				errornl(ctx, "Waiting for motion controller heartbeat while running 'SET JOINT_WAIT_HOMED' failed");
+				return rtError;
+			}
+		}
+		if (!emcStatus->motion.joint[joint].homing && !emcStatus->motion.joint[joint].homed) {
+			errornl(ctx, fmt::format("Joint '{}' is not homed and not in the process of homing.", joint));
+			return rtError;
+		}
 	}
 
 	double timeout = JOINT_WAIT_HOMED_TIMEOUT;
@@ -1269,11 +1329,13 @@ static cmdResponseType setBrake(connectionRecType &ctx)
 static std::optional<std::string> findFilename(const std::string &filename)
 {
 	if (filename.size() < 1)
-		return nullptr;
+		return std::nullopt;
 
 	struct stat sb;
 	if (filename[0] == '/') { // Absolute path
-		return !stat(filename.c_str(), &sb) ? filename : nullptr;
+		if (!stat(filename.c_str(), &sb))
+			return filename;
+		return std::nullopt;
 	}
 
 	// Relative name, try the search path
@@ -1285,7 +1347,9 @@ static std::optional<std::string> findFilename(const std::string &filename)
 	}
 
 	// Last resort, try the filename 'as is'
-	return !stat(filename.c_str(), &sb) ? filename : nullptr;
+	if (!stat(filename.c_str(), &sb))
+		return filename;
+	return std::nullopt;
 }
 
 static cmdResponseType setLoadToolTable(connectionRecType &ctx)
@@ -1378,6 +1442,27 @@ static cmdResponseType setJointHome(connectionRecType &ctx)
 	}
 	if (sendHome(joint))
 		return rtError;
+
+	if (joint >= 0) {
+		// The motion controller needs a servo-thread run to raise the
+		// homing flag. Wait for it so that a following command, like
+		// 'SET JOINT_WAIT_HOMED', can rely on the state being visible.
+		// Note: a homed joint may not enter the homing state again
+		// (HOME_NO_REHOME), hence the check for either state.
+		for (unsigned toc = 0; toc < WAIT_TASK_STATE_CHANGE_MAX; toc++) {
+			// Wait for the motion control to run
+			if (rtOk != doWaitHeartbeat(ctx, 1, WAIT_HEARTBEAT_TIMEOUT)) {
+				// Bad sign,... can't wait for a heartbeat
+				errornl(ctx, "Waiting for motion controller heartbeat while running 'SET JOINT_HOME' failed");
+				return rtError;
+			}
+			updateStatus();
+			if (emcStatus->motion.joint[joint].homing || emcStatus->motion.joint[joint].homed)
+				return rtOk;
+		}
+		errornl(ctx, fmt::format("Joint '{}' did not start homing", joint));
+		return rtError;
+	}
 	return rtOk;
 }
 
@@ -3039,7 +3124,7 @@ int commandGetSet(connectionRecType &ctx, cmdType getset)
 			errornl(
 				ctx,
 				fmt::format("Too few arguments to SET {}, have {}, need {} or more", tag->name, ctx.toks.size() - 2, tag->nset));
-			replynl(ctx, fmt::format("GET {} NAK", tag->name));
+			replynl(ctx, fmt::format("SET {} NAK", tag->name));
 			return -1;
 		}
 
@@ -3383,6 +3468,13 @@ static void closeClient(connectionRecType &ctx)
 {
 	if (ctx.sock < 0)
 		return;
+	if(ctx.cmdtimeout > 0.0) {
+		// Happens when a client disconnects with an active SET command. This
+		// is bad because it desynchronizes the command channel from the error
+		// channel. We don't know what happened anymore.
+		info("Warning: Client '%s' disconnected while waiting for SET %s", ctx.hostname.c_str(), activeSetter.c_str());
+		setterClear(ctx);
+	}
 	info("Connection terminated '%s' (%d)", ctx.hostname.c_str(), ctx.sock);
 	close(ctx.sock);
 	ctx.sock = -1;
@@ -3452,8 +3544,11 @@ static int sockMain(int svrfd)
 		} else if (pfds[0].revents & POLLIN) {
 			// POLLIN on a listen socket means new connection available
 			int cfd;
-			struct sockaddr_in6 csa;
-			socklen_t csal = sizeof(csa);
+			union {
+				struct sockaddr_in6 csa6;
+				struct sockaddr_in  csa4;
+			} csa;
+			socklen_t csal = sizeof(csa);	// Will be the largest of the two
 			cfd = accept(svrfd, reinterpret_cast<struct sockaddr *>(&csa), &csal);
 			if (cfd < 0) {
 				switch (errno) {
@@ -3496,9 +3591,15 @@ static int sockMain(int svrfd)
 					cr.waitmode = EMC_WAIT_DONE;
 					//cr.timestamp= true;
 					clients.push_back(cr);
-					char addr[INET6_ADDRSTRLEN] = {};
-					inet_ntop(AF_INET6, &csa.sin6_addr, addr, sizeof(addr));
-					info("New connection from %s:%d", addr, ntohs(csa.sin6_port));
+					if(isipv4) {
+						char addr[INET_ADDRSTRLEN] = {};
+						inet_ntop(AF_INET, &csa.csa4.sin_addr, addr, sizeof(addr));
+						info("New connection from %s:%d", addr, ntohs(csa.csa4.sin_port));
+					} else {
+						char addr[INET6_ADDRSTRLEN] = {};
+						inet_ntop(AF_INET6, &csa.csa6.sin6_addr, addr, sizeof(addr));
+						info("New connection from %s:%d", addr, ntohs(csa.csa6.sin6_port));
+					}
 				} else {
 					close(cfd);
 				}
@@ -3654,6 +3755,7 @@ static void usage(char *pname)
 		   "   -s,--sessions <num>   Restrict number of session to 'num' (default=%u) (0 for no limit)\n"
 		   "   -d,--path <path>      Set (colon-separated) search path to 'path' (default=%s)\n"
 		   "   -q,--quiet            Don't print informational messages\n"
+		   "   -4,--ipv4             Only use IPv4\n"
 		   "LinuxCNC_Options:\n"
 		   "   -ini <INI file>       (default=%s)\n",
 		   pname,
@@ -3702,8 +3804,11 @@ int main(int argc, char *argv[])
 	searchPath.push_back(getDefaultPath());
 
 	// process local command line args
-	while ((opt = getopt_long(argc, argv, "he:n:p:s:w:d:q", longopts, NULL)) != -1) {
+	while ((opt = getopt_long(argc, argv, "4he:n:p:s:w:d:q", longopts, NULL)) != -1) {
 		switch (opt) {
+		case '4':
+			isipv4 = true;
+			break;
 		case 'h':
 			usage(argv[0]);
 			return EXIT_FAILURE;

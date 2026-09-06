@@ -20,7 +20,7 @@
 #include "emctool.h"
 #include "canon_position.hh"
 #include <emcmotcfg.h> // Just for EMCMOT_NUM_SPINDLES
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 
 /*
   This is the header file that all applications that use the
@@ -399,7 +399,11 @@ extern void SET_FEED_MODE(int spindle, int mode);
  * inches per revolution (G20 in effect) or mm per minute (G21 in effect)
  * The spindle number indicates which spindle the movement is synchronised to */
 
-extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance);
+/* G64_R_PLANNER: two optional trailing args fold the planner mode (G64 R word)
+ * into the existing control-mode call. Defaults -1/-1.0 = "leave unchanged",
+ * so existing callers (G61, G61.1, cutter-comp save/restore) are unaffected. */
+extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance,
+                                    int planner_type = -1, double scurve_peak_scale = -1.0);
 
 extern void SET_NAIVECAM_TOLERANCE(double tolerance);
 
@@ -639,7 +643,7 @@ This is usually given in rpm and refers to the rate of spindle
 rotation. If the spindle is already turning and is at a different
 speed, change to the speed given with this command. */
 
-extern void STOP_SPINDLE_TURNING(int spindle);
+extern void STOP_SPINDLE_TURNING(int spindle, int wait_for_atspeed = 1);
 
 /* Stop the spindle from turning. If the spindle is already stopped, this
 command may be given, but it will have no effect. */

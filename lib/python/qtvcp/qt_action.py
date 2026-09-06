@@ -39,6 +39,7 @@ class _Lcnc_Action(object):
         self.home_all_warning_flag = False
         self.proc = None
         self.lastOriginSet = [0,0,0,0,0,0,0,0,0]
+        self.last_mode = linuxcnc.MODE_MANUAL
 
         # imported here to avoid circular imports
         from qtvcp.lib.mdi_subprogram.mdi_command_process import MDICommand
@@ -183,13 +184,16 @@ class _Lcnc_Action(object):
         except StopIteration:
             pass
 
-    def CALL_MDI(self, code):
+    def CALL_MDI(self, code, mode_return=False):
         LOG.debug('CALL_MDI Command: {}'.format(code))
         if STATUS.is_auto_running():
             LOG.error('Can not run MDI command:{} when linuxcnc is running in auto mode'.format(code))
             return -1
+        self.RECORD_CURRENT_MODE()
         self.ensure_mode(linuxcnc.MODE_MDI)
         self.cmd.mdi('%s' % code)
+        if mode_return:
+            self.RESTORE_RECORDED_MODE()
         return 1
 
     def CALL_BACKGROUND_MDI(self, code, label='Background MDI',timeout=30):
@@ -252,6 +256,7 @@ class _Lcnc_Action(object):
             if not self.check_macro_path(code):
                 return
             # run command
+            self.ensure_mode(linuxcnc.MODE_MDI)
             self.cmd.mdi('%s' % code)
 
     def RUN_MACRO( self, data):
@@ -280,7 +285,7 @@ class _Lcnc_Action(object):
         if retval == QMessageBox.Ok:
             LOG.debug(f'Run Macro Command:{command}')
             self.SET_GRAPHICS_VIEW('clear')
-            self.CALL_MDI(command)
+            self.CALL_MDI(command, mode_return=True)
             return
 
     def CALL_OWORD(self, code, time=5):
@@ -394,7 +399,7 @@ class _Lcnc_Action(object):
                 outfile.close()
             except:
                 pass
-            return npath
+        return npath
 
     def SET_AXIS_ORIGIN(self, axis, value):
         if axis == '' or axis.upper() not in ("XYZABCUVW"):

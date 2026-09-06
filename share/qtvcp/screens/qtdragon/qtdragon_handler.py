@@ -113,6 +113,7 @@ class HandlerClass:
         self._lastSelectButton = None
         self.MPGFocusWidget = None
         self.CycleFocusWidget = None
+        self.auto_mode_switch = False
         self.lineedit_list = ["work_height", "touch_height", "sensor_height", "laser_x", "laser_y",
                               "sensor_x", "sensor_y", "camera_x", "camera_y",
                               "search_vel", "probe_vel", "max_probe", "eoffset_count"]
@@ -299,6 +300,10 @@ class HandlerClass:
         self.log_version()
         STATUS.emit('update-machine-log', '', 'OFF')
 
+        # preset MPG focus object
+        self.MPGFocusWidget = self.w.gcodegraphics
+        self.MPGFocusWidgetBorder= 'stackedWidget_mainTabPage1'
+
     def init_utils(self):
         from qtvcp.lib.gcode_utility.facing import Facing
         self.facing = Facing()
@@ -414,6 +419,7 @@ class HandlerClass:
         self.w.camview._camNum = self.w.PREFS_.getpref('Camview cam number', 0, int, 'CUSTOM_FORM_ENTRIES')
         self.w.camview.setAPI(self.w.PREFS_.getpref('Camview cam api', 'ANY', str, 'CUSTOM_FORM_ENTRIES'))
         self.w.camview.setResolution(self.w.PREFS_.getpref('Camview cam resolution', 'DEFAULT', str, 'CUSTOM_FORM_ENTRIES'))
+        self.auto_mode_switch = self.w.PREFS_.getpref('auto mode switching', False, bool, 'CUSTOM_FORM_ENTRIES')
 
     def closing_cleanup__(self):
         if not self.w.PREFS_: return
@@ -452,8 +458,8 @@ class HandlerClass:
         self.w.PREFS_.putpref('Camview xscale', self.cam_xscale_percent(), int, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Camview yscale', self.cam_yscale_percent(), int, 'CUSTOM_FORM_ENTRIES')
         self.w.PREFS_.putpref('Camview cam number', self.w.camview._camNum, int, 'CUSTOM_FORM_ENTRIES')
-        self.w.PREFS_.putpref('Camview cam api', self.w.camview.getAPIName(), str, 'CUSTOM_FORM_ENTRIES')
-        self.w.PREFS_.putpref('Camview cam resolution', self.w.camview.resolution, int, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Camview cam api', self.w.camview.getAPIName(self.w.camview._camNum), str, 'CUSTOM_FORM_ENTRIES')
+        self.w.PREFS_.putpref('Camview cam resolution', self.w.camview.resolution, str, 'CUSTOM_FORM_ENTRIES')
 
     def init_widgets(self):
         self.adjust_stacked_widgets(TAB_MAIN)
@@ -865,7 +871,7 @@ class HandlerClass:
             self.first_turnon = False
             if self.w.chk_reload_tool.isChecked():
                 command = "M61 Q{} G43".format(self.reload_tool)
-                ACTION.CALL_MDI(command)
+                ACTION.CALL_MDI(command, mode_return=True)
             if self.last_loaded_program is not None and self.w.chk_reload_program.isChecked():
                 if os.path.isfile(self.last_loaded_program):
                     self.w.cmb_gcode_history.addItem(self.last_loaded_program)
@@ -995,7 +1001,7 @@ class HandlerClass:
         if not  os.path.exists(self.last_loaded_program):
             self.add_status(_translate("HandlerClass","No program to execute"), WARNING)
             return
-        if not STATUS.is_auto_mode():
+        if not STATUS.is_auto_mode() and not self.auto_mode_switch:
             self.add_status(_translate("HandlerClass","Must be in AUTO mode to run a program"), WARNING)
             return
         if self.w.stackedWidget_mainTab.currentIndex() != 0:
@@ -1143,7 +1149,7 @@ class HandlerClass:
 
         self.add_status(_translate("HandlerClass","Laser offsets set"))
         command = "G10 L20 P0 X{:3.4f} Y{:3.4f}".format(x, y)
-        ACTION.CALL_MDI(command)
+        ACTION.CALL_MDI(command, mode_return=True)
     
     def btn_ref_camera_clicked(self):
         x = float(self.w.lineEdit_camera_x.text())
@@ -1158,7 +1164,7 @@ class HandlerClass:
 
         self.add_status(_translate("HandlerClass","Camera offsets set"))
         command = "G10 L20 P0 X{:3.4f} Y{:3.4f}".format(x, y)
-        ACTION.CALL_MDI(command)
+        ACTION.CALL_MDI(command, mode_return=True)
     
     # tool tab
     def btn_m61_clicked(self):
@@ -1167,7 +1173,7 @@ class HandlerClass:
             self.add_status(_translate("HandlerClass","Select only 1 tool to load"), WARNING)
         elif checked:
             self.add_status("{} {}".format(_translate("HandlerClass","Loaded tool"), checked[0]))
-            ACTION.CALL_MDI("M61 Q{} G43".format(checked[0]))
+            ACTION.CALL_MDI("M61 Q{} G43".format(checked[0]), mode_return=True)
         else:
             self.add_status(_translate("HandlerClass","No tool selected"), CRITICAL)
 
@@ -1438,6 +1444,7 @@ class HandlerClass:
     def update_pause_button(self,data):
         self.w.action_pause._blockSignals(True)
         self.w.action_pause.setChecked(data)
+        self.pause_timer(data)
         # only enable the lift selection button if pins are connected
         if self.spindle_lift_pins_present and self.w.chk_eoffsets.isChecked():
             self.w.btn_spindle_pause.setEnabled(not data)
@@ -1500,7 +1507,7 @@ class HandlerClass:
         if retval == QtWidgets.QMessageBox.Ok:
             self.add_status(f'Run Macro Command:{command}')
             ACTION.SET_GRAPHICS_VIEW('clear')
-            ACTION.CALL_MDI(command)
+            ACTION.CALL_MDI(command, mode_return=True)
             return
 
         self.add_status('Macro cancelled')
@@ -1777,6 +1784,22 @@ class HandlerClass:
         self.timer_on = True
         self.timer_tick = time.time()
 
+    def pause_timer(self, state):
+        # stop the timer update but
+        # keep track of accumulated time
+        if state:
+            self.timer_on = False
+            tick = time.time()
+            self.run_time += tick - self.timer_tick
+            txt = _translate("HandlerClass","Run timer paused at")
+            self.add_status("{} {}".format(txt, self.w.lbl_runtime.text()))
+
+        # reset the time reference point to now
+        # but don't reset the accumulated time
+        else:
+            self.timer_on = True
+            self.timer_tick = time.time()
+
     def stop_timer(self):
         self.timer_on = False
         if STATUS.is_auto_mode():
@@ -1888,10 +1911,13 @@ class HandlerClass:
         currentIndex = self.w.stackedWidget_mainTab.currentIndex()
         indexList = ['main','file','offsets','tool','status','probe','cam',
                     'gcode','setup','settings','util','user']
-
+        if self.auto_mode_switch and not STATUS.is_auto_running():
+            opt = requestedIndex,PAGE_FILE,True,IGNORE,False
+        else:
+            opt = TAB_MAIN,PAGE_GCODE,False,SHOW_DRO,False
         if mode == 'Auto':
             seq = {TAB_MAIN: (TAB_MAIN,PAGE_GCODE,False,SHOW_DRO,False),
-                    TAB_FILE: (TAB_MAIN,PAGE_GCODE,False,SHOW_DRO,False),
+                    TAB_FILE: (opt),
                     TAB_OFFSETS: (TAB_MAIN,PAGE_GCODE,False,SHOW_DRO,False),
                     TAB_TOOL: (TAB_MAIN,PAGE_GCODE,False,SHOW_DRO,False),
                     TAB_STATUS: (requestedIndex,PAGE_GCODE,False,SHOW_DRO,False),
@@ -1990,6 +2016,11 @@ class HandlerClass:
         else:
             # set main tab to adjusted index
             self.w.stackedWidget_mainTab.setCurrentIndex(main_index)
+
+        # switch modes if file is pressed in auto mode
+        if main_index == TAB_FILE and self.auto_mode_switch:
+            if STATUS.is_auto_mode():
+                ACTION.SET_MANUAL_MODE()
 
         # if indexes don't match then request is disallowed
         # give a warning and reset the button check
@@ -2320,7 +2351,7 @@ class HandlerClass:
             ACTION.SET_MACHINE_HOMING(-1)
 
     def on_keycall_pause(self,event,state,shift,cntrl):
-        if state and STATUS.is_auto_mode() and self.use_keyboard():
+        if state and self.use_keyboard():
             self.w.action_pause.click()
 
     def on_keycall_jograte(self,event,state,shift,cntrl,value):

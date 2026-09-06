@@ -29,6 +29,26 @@ KeyboardInterrupt exception will be raised.
 
 import _hal
 from _hal import *
+from _hal import query
+import sys
+import warnings
+import lcnc_realtime
+
+# _hal.query is a submodule, not a plain attribute. Registering it in
+# sys.modules under its dotted name makes 'import hal.query' and 'from hal
+# import query' work as they would for a real package.
+sys.modules['hal.query'] = query
+
+def __getattr__(name):
+    if name == 'is_rt':
+        warnings.warn(f"{name} is deprecated, use lcnc_realtime.verify() instead", FutureWarning, stacklevel=2)
+        return lcnc_realtime.verify()
+
+    if name == 'is_sim':
+        warnings.warn(f"{name} is deprecated, use lcnc_realtime.verify() instead", FutureWarning, stacklevel=2)
+        return not lcnc_realtime.verify()
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 class _ItemWrap(object):
     def __new__(cls, item):

@@ -1109,9 +1109,15 @@ M2 (end program)
 It is an error if:
 
 * All axis words are omitted.
-* The spindle is not turning when this command is executed.
-* The requested linear motion exceeds machine velocity limits
-  due to the spindle speed.
+* No K word is given.
+* An F word is given (the feed follows from K and the spindle speed).
+* The selected spindle is not commanded to turn (M3 or M4 active) when
+  this command is executed.
+
+[NOTE]
+The pitch and the spindle speed together set the axis feed. If they ask for
+more than the machine can deliver, the program is not rejected: there is no
+interpreter check and no error message for that case.
 
 [[gcode:g33.1]]
 == G33.1 Rigid Tapping(((G33.1 Rigid Tapping)))
@@ -1123,6 +1129,7 @@ G33.1 X- Y- Z- K- I- $-
 
 * 'K' - distance per revolution
 * 'I' - optional spindle speed multiplier for faster return move
+  (values less than 1 are treated as 1)
 * '$' - optional spindle selector
 
 [WARNING]
@@ -1175,9 +1182,15 @@ M2 (end program)
 It is an error if:
 
 * All axis words are omitted.
-* The spindle is not turning when this command is executed
-* The requested linear motion exceeds machine velocity limits
-  due to the spindle speed
+* No K word is given.
+* An F word is given (the feed follows from K and the spindle speed).
+* The selected spindle is not commanded to turn (M3 or M4 active) when
+  this command is executed.
+
+[NOTE]
+The pitch and the spindle speed together set the axis feed. If they ask for
+more than the machine can deliver, the program is not rejected: there is no
+interpreter check and no error message for that case.
 
 [[gcode:g38]]
 == G38._n_ Straight Probe(((G38.n Probe)))
@@ -1263,6 +1276,28 @@ G38.2 Z-100 F100
 G10 L1 P#5400 Z#<zworkoffset> (set new tool offset)
 G43
 ----
+
+[[gcode:probe-machine-coordinates]]
+Probe results in #5061 to #5069 are expressed in the current work
+coordinate system, not in machine coordinates. To convert one, add the
+offset between the two frames. That offset is the difference between the
+current position reported in both frames at once: #5021 to #5029 hold the
+absolute machine position and #5420 to #5428 hold the work position.
+Because the offset is the same everywhere, it can be read at any later
+position and still applies to the earlier probe result.
+
+.Reading the machine coordinates of a probe
+[source,ngc]
+----
+G38.2 Z-100 F100
+#<zmachine> = [#5063 + #5023 - #5422]
+----
+
+#5063 is the probed Z in the work frame, and #5023 - #5422 is the
+machine-to-work Z offset (current machine Z minus current work Z). The
+same pattern applies to the other axes using their respective parameters.
+This holds whichever coordinate system, G92/G52 or tool length offset is
+active, as long as no coordinate-system rotation is in effect.
 
 A comment of the form '(PROBEOPEN filename.txt)' will open
 'filename.txt' and store the 9-number coordinate consisting of
@@ -1406,8 +1441,10 @@ G43 <H->
 
 'G43 H__n__' uses the offset for tool _n_.
 
-The active tool length compensation values are stored in the numbered
-parameters '5401-5409'.
+The tool length compensation values actually applied to motion are stored
+in the numbered parameters '5081-5089'.  The numbered parameters
+'5401-5409' instead hold the loaded tool's stored offset, refreshed on tool
+change ('M6') and 'G10 L1'/'L10'/'L11'.
 
 [NOTE]
 'G43 H0' is a little special.  Its behavior is different on random
@@ -1619,11 +1656,12 @@ overview of coordinate systems.
 
 [source,ngc]
 ----
-G64 <P- <Q->>
+G64 <P- <Q-> <R->>
 ----
 
 * 'P' - motion blending tolerance
 * 'Q' - naive cam tolerance
+* 'R' - trajectory planner selection and cornering aggressiveness (this fork only)
 * 'G64' - best possible speed. Without P (Or a default value in <<sub:ini:sec:rs274ngc,RS274NGC>>) means to keep the best speed
   possible, no matter how far away from the programmed point you end up.
 * 'G64 P-' - Blend between best speed and deviation tolerance
@@ -1651,7 +1689,53 @@ G64 <P- <Q->>
   and use the value of P-.
   Set Q to zero to disable the 'Naive CAM Detector'.
 
+=== G64 R: planner selection (((G64 R Planner)))
+
+The optional R word selects the trajectory planner and its cornering
+aggressiveness in one modal dial:
+
+* 'R omitted' - the planner is left exactly as it was (modal).
+* 'R0' (or negative) - trapezoidal planner: acceleration is bounded but can
+  step instantly (jerk is not limited).
+* 'R0.1 .. R1.0' - jerk-limited (S-curve) planner. The value sets the
+  cornering aggressiveness as the fraction of the jerk-feasible corner
+  speed that the look-ahead may use: 'R1.0' is full corner speed, lower
+  values corner more gently ('R0.5' matches the initial S-curve release).
+  Values outside 0.1..1.0 are clamped.
+
+The program only requests 'trapezoidal' or 'smooth'; which smooth planner
+implements the request is machine configuration
+(<<sub:ini:sec:traj,[TRAJ]SMOOTH_PLANNER>>), so part programs remain valid
+when the machine's planner implementation changes.
+
+[NOTE]
+====
+R0 to R0.1 is a regime flip, not the gentle end of a gradient: the
+trapezoidal planner is the jerk-unlimited, most aggressive setting, while
+R0.1 is the gentlest (jerk-limited and slowest through corners). Within
+R0.1..R1.0 the motion is equally smooth in the jerk sense; only the corner
+speed changes.
+====
+
+Behavior details:
+
+* A planner switch requested while queued motion remains is latched and
+  applied automatically once no queued motion is left; a message informs
+  the operator and motion is never aborted. The request persists until
+  applied or superseded. Set 'G64 ... R' in the program preamble, where
+  the switch is instant.
+* If the machine has no smooth planner available ('SMOOTH_PLANNER = 0' or
+  no usable jerk limit configured), 'R > 0' is refused with an operator
+  error instead of being silently ignored.
+* The R word cannot be used on a line that also contains 'M19' (the R
+  meanings would be ambiguous); this is an error.
+
 It is a good idea to include a path control specification in the preamble of each G-code file.
+
+It is an error if:
+
+* The path control mode is changed (G61, G61.1 or G64) while cutter
+  radius compensation is active.
 
 .G64 P- Q- Example Line
 [source,ngc]
@@ -2696,7 +2780,8 @@ G96 <D-> S- <$-> (Constant Surface Speed Mode)
 G97 S- <$-> (RPM Mode)
 ----
 
-. 'D' - maximum rotation speed (RPM), optional
+. 'D' - maximum rotation speed (RPM), optional. Without D the spindle
+  speed in CSS mode is not limited by the interpreter.
 . 'S' - spindle speed
 . '$' - the spindle of which the speed will be varied, optional.
 
@@ -2723,7 +2808,6 @@ G96 D2500 S250 (set CSS with a max rpm of 2500 and a surface speed of 250)
 It is an error if:
 
 * S is not specified with G96
-* A feed move is specified in G96 mode while the spindle is not turning
 
 [[gcode:g98-g99]]
 == G98, G99 Canned Cycle Return Level(((G98, G99 Canned Cycle Return)))

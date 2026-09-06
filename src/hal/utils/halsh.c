@@ -81,7 +81,7 @@ static int halCmd(ClientData cd, Tcl_Interp *interp, int argc, const char **argv
 
     target_interp = interp;
     pending_cr = 0;
-    result = halcmd_parse_cmd((char **)argv+1);
+    result = halcmd_parse_cmd((const char **)argv+1);
     target_interp = NULL;
 
     if(result == 0) return TCL_OK;
@@ -251,8 +251,8 @@ int Hal_Init(Tcl_Interp *interp) {
         return TCL_ERROR;
     }
 
-    Tcl_CreateCommand(interp, "hal", halCmd, 0, halExit);
-    Tcl_CreateCommand(interp, "hal_stream", halStreamCmd, 0, NULL);
+    Tcl_CreateCommand(interp, "hal", halCmd, NULL, halExit);
+    Tcl_CreateCommand(interp, "hal_stream", halStreamCmd, NULL, NULL);
 
     Tcl_PkgProvide(interp, "Hal", "1.0");
     return TCL_OK;

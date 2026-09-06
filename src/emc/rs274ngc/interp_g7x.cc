@@ -915,10 +915,8 @@ void g7x::add_distance(double distance) {
 #include <cstring>
 #include <string>
 #include "rs274ngc.hh"
-#include "rs274ngc_return.hh"
 #include "rs274ngc_interp.hh"
 #include "interp_internal.hh"
-#include "units.h"
 
 class motion_machine:public motion_base {
     Interp *interp;
@@ -1056,7 +1054,7 @@ int Interp::convert_g7x(int /*mode*/,
     auto exit_call_level=settings->call_level;
     CHP(read((std::string("O")+std::to_string(static_cast<int>(block->q_number))+" CALL").c_str()));
     for(;;) {
-	if(block->o_name!=0)
+	if(block->o_name!=NULL)
 	    CHP(convert_control_functions(block, settings));
 	if(settings->call_level==exit_call_level)
 	    break;

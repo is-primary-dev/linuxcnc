@@ -36,10 +36,10 @@ proc set_defaults {} {
   set ::LH(start) [clock seconds]
   # don't include glxgears, error suffices
   program_check {halrun halcmd lsmod pgrep pkill hostname}
+  set ::LH(realtime) [exec linuxcnc_var REALTIME]
+  program_check $::LH(realtime)
   if {[string first rtai [string tolower $::tcl_platform(osVersion)]] >=0} {
     set ::LH(rtai) rtai
-    set ::LH(realtime) [exec linuxcnc_var REALTIME]
-    program_check $::LH(realtime)
   }
 
   set ::LH(use_x)    1
@@ -313,11 +313,7 @@ proc load_packages {} {
     exit 1
   }
 
-  if [info exists ::LH(rtai)] {
-    exec $::LH(realtime) start &
-    progress "Delay for realtime startup"
-    after 1000 ;# wait to load Hal package
-  }
+  exec $::LH(realtime) start >@stdout  2>@stderr
 
   # augment ::auto_path for special case:
   # 1) RIP build (no install)
@@ -334,6 +330,42 @@ proc load_packages {} {
     exit 1
   }
 } ;# load_packages
+
+proc rt_status_items {} {
+  # Returns {text color} pairs; color is "" except where it needs attention.
+  set red "#cc4444"
+  set items {}
+
+  # realtime: type from 'realtime verify' stdout, yes/no from its exit status.
+  set rt_text "no realtime"
+  set rt_ok 0
+  if {![catch {open [list | $::LH(realtime) verify 2> /dev/null] r} chan]} {
+    set out [string trim [read $chan]]
+    set rt_ok [expr {![catch {close $chan}]}]
+    if {$out ne ""} {set rt_text $out}
+  }
+  lappend items [list $rt_text [expr {$rt_ok ? "" : $red}]]
+
+  # cpu governor: red when not 'performance'
+  set gov ""
+  catch {set gov [string trim [exec cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor]]}
+  if {$gov eq ""} {set gov "gov?"}
+  if {$gov eq "performance"} {
+    lappend items [list $gov ""]
+  } else {
+    lappend items [list $gov $red]
+  }
+
+  # isolcpus
+  set cmdline ""
+  catch {set cmdline [exec cat /proc/cmdline]}
+  if {[regexp {isolcpus=(\S+)} $cmdline -> iso]} {
+    lappend items [list "isolcpus=$iso" ""]
+  } else {
+    lappend items [list "no_isolcpus" ""]
+  }
+  return $items
+} ;# rt_status_items
 
 proc make_gui { {w .} } {
   set f [frame ${w}fa]
@@ -436,6 +468,28 @@ proc make_gui { {w .} } {
            -command "xaxis $thd"] -side left
     }
 
+  }
+
+  # --- realtime status bar (true footer): one line of axis-style sunken
+  # cells split into equal thirds, left/centre/right aligned ---
+  set sb [frame ${w}statusbar]
+  pack $sb -side bottom -fill x
+  set sbitems [rt_status_items]
+  # Fixed-width sides (chars), elastic middle gets the rest.
+  # Left fits the longest RT label (RT-Xenomai-EVL); right fits isolcpus up to ~4 cpus.
+  set sbwidth  {14 0 18}
+  set sbweight {0  1 0}
+  set sbanch   {w center e}
+  set i 0
+  foreach item $sbitems {
+    lassign $item text color
+    label $sb.s$i -text $text -relief sunken -bd 1 -anchor [lindex $sbanch $i] -padx 6
+    set wdt [lindex $sbwidth $i]
+    if {$wdt > 0} {$sb.s$i configure -width $wdt}
+    if {$color ne ""} {$sb.s$i configure -fg $color}
+    grid $sb.s$i -row 0 -column $i -sticky we
+    grid columnconfigure $sb $i -weight [lindex $sbweight $i]
+    incr i
   }
 
   set f [frame ${w}bot]
@@ -617,6 +671,10 @@ proc start_collection {} {
     hal addf $::LH($thd,name) t_$thd
     hal setp $::LH($thd,name).maxbinnumber $::LH($thd,maxbins)
     hal setp $::LH($thd,name).nsbinsize    $::LH($thd,binsize,ns)
+    # Acquisition bin count stays at this startup value: the "Display
+    # +/- bins" radio only zooms the chart, the streamed snapshot size
+    # must not follow it.
+    set ::LH($thd,acqbins) $::LH($thd,maxbins)
     if {!$::LH(legacy)} {
       # Comp boots with reset=1 so bins start clean. Drop reset and let
       # samples flow.
@@ -734,9 +792,14 @@ proc update_bin_data {thd} {
     set ::LH($thd,nextra) [hal getp $::LH($thd,name).nextra]
   } else {
     # Atomic snapshot via latencybinstream FIFO. Rising edge on
-    # `stream` makes RT push 2N+3 records. Wait for FIFO depth, drain
-    # via the Tcl hal_stream binding, lower trigger.
-    set need [expr {2*$N + 3}]
+    # `stream` makes RT push 2A+3 records, where A is the startup
+    # acquisition bin count (comp maxbinnumber). The display bin count
+    # N may be smaller after a "Display +/- bins" change; only the
+    # first N bins of the snapshot are shown. Wait for FIFO depth,
+    # drain via the Tcl hal_stream binding, lower trigger.
+    set A $::LH($thd,acqbins)
+    if {$N > $A} { set N $A }
+    set need [expr {2*$A + 3}]
     set h $::LH($thd,stream,h)
     hal setp $::LH($thd,name).stream 1
     # Wait until exactly `need` records are queued. Reading early can
@@ -777,16 +840,17 @@ proc update_bin_data {thd} {
     }
     set ntail [lindex $vals 0]
     set ptail [lindex $vals end]
-    # Stream order: ntail, nbin[N..1], pbin[0..N], ptail
+    # Stream order: ntail, nbin[A..1], pbin[0..A], ptail. Display uses
+    # only bins 0..N (N <= A).
     for {set k 0} {$k <= $N} {incr k} {
       lappend pxd [expr $k * $bs]
-      set v [lindex $vals [expr {$N + 1 + $k}]]
+      set v [lindex $vals [expr {$A + 1 + $k}]]
       if {$v == 1} { set v 1.1 }
       lappend pyd $v
     }
     for {set k 1} {$k <= $N} {incr k} {
       lappend nxd [expr -$k * $bs]
-      set v [lindex $vals [expr {$N - $k + 1}]]
+      set v [lindex $vals [expr {$A - $k + 1}]]
       if {$v == 1} { set v 1.1 }
       lappend nyd $v
     }

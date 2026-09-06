@@ -274,7 +274,8 @@ image:images/gmoccapy_getting_macro_info_mid.png[align="left",link="images/gmocc
 You can add embedded programs to GMOCCAPY like you can do in AXIS, Touchy and Gscreen.
 All is done by GMOCCAPY automatically if you include a few lines in your INI file in the DISPLAY section.
 
-If you have never used a Glade panel, I recommend to read the excellent documentation on https://linuxcnc.org/docs/2.9/html/gui/gladevcp.html[Glade VCP].
+If you have never used a Glade panel, I recommend to read the excellent documentation on https://linuxcnc.org/docs/2.9/html/gui/gladevcp.html[Glade VCP]. +
+You can embed QtVCP panels too: <<cha:qtvcp:panels, QtVCP panels>>
 
 .Embedded Tab Example
 
@@ -1370,7 +1371,13 @@ To avoid that any program is loaded at start up, just press the None button.
 
 The file selection screen will use the filters you have set in the INI file,
 if there aren't any filters given, you will only see *NGC files*.
-The path will be set according to the INI settings in `[DISPLAY] PROGRAM_PREFIX`.
+The path will be set according to the INI settings in `[DISPLAY] PROGRAM_PREFIX`. +
+NGC files can be explicitly excluded from the file selection screen by passing *no_ngc* instead of an extension:
+
+[source,ini]
+----
+PROGRAM_EXTENSION = no_ngc Exclude ngc files from selection screen
+----
 
 .Jump to dir
 
