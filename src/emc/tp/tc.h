@@ -28,6 +28,7 @@ double tcGetMaxTargetVel(TC_STRUCT const * const tc,
 
 double tcGetOverallMaxAccel(TC_STRUCT const * tc);
 double tcGetTangentialMaxAccel(TC_STRUCT const * const tc);
+double tcGetCycleMaxAccel(TC_STRUCT const * const tc, int in_overlap);
 
 int tcSetKinkProperties(TC_STRUCT *prev_tc, TC_STRUCT *tc, double kink_vel, double accel_reduction);
 int tcInitKinkProperties(TC_STRUCT *tc);
@@ -113,7 +114,6 @@ int tcFinalizeLength(TC_STRUCT * const tc);
 
 int tcClampVelocityByLength(TC_STRUCT * const tc);
 
-int tcPureRotaryCheck(TC_STRUCT const * const tc);
 
 int tcSetCircleXYZ(TC_STRUCT * const tc, PmCircle const * const circ);
 

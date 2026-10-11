@@ -234,17 +234,17 @@ class VersaProbeParent(QtWidgets.QWidget, _HalWidgetBase):
         # make pins available for tool measure remaps
         oldname = self.HAL_GCOMP_.comp.getprefix()
         self.HAL_GCOMP_.comp.setprefix('qtversaprobe')
-        self.pin_svel = self.HAL_GCOMP_.newpin("searchvel", hal.HAL_FLOAT, hal.HAL_OUT)
+        self.pin_svel = self.HAL_GCOMP_.newpin("searchvel", hal.Type.REAL, hal.Dir.OUT)
         self.pin_svel.set(float(self.input_search_vel.text()))
-        self.pin_pvel = self.HAL_GCOMP_.newpin("probevel", hal.HAL_FLOAT, hal.HAL_OUT)
+        self.pin_pvel = self.HAL_GCOMP_.newpin("probevel", hal.Type.REAL, hal.Dir.OUT)
         self.pin_pvel.set(float(self.input_probe_vel.text()))
-        self.pin_pheight = self.HAL_GCOMP_.newpin("probeheight", hal.HAL_FLOAT, hal.HAL_OUT)
+        self.pin_pheight = self.HAL_GCOMP_.newpin("probeheight", hal.Type.REAL, hal.Dir.OUT)
         self.pin_pheight.set(float(self.input_tool_probe_height.text()))
-        self.pin_bheight = self.HAL_GCOMP_.newpin("blockheight", hal.HAL_FLOAT, hal.HAL_OUT)
+        self.pin_bheight = self.HAL_GCOMP_.newpin("blockheight", hal.Type.REAL, hal.Dir.OUT)
         self.pin_bheight.set(float(self.input_tool_block_height.text()))
-        self.pin_latch_rtn = self.HAL_GCOMP_.newpin("backoffdist", hal.HAL_FLOAT, hal.HAL_OUT)
+        self.pin_latch_rtn = self.HAL_GCOMP_.newpin("backoffdist", hal.Type.REAL, hal.Dir.OUT)
         self.pin_latch_rtn.set(float(self.input_latch_return_dist.text()))
-        self.probe_loaded = self.HAL_GCOMP_.newpin("probe-loaded", hal.HAL_BIT, hal.HAL_OUT)
+        self.probe_loaded = self.HAL_GCOMP_.newpin("probe-loaded", hal.Type.BOOL, hal.Dir.OUT)
         self.HAL_GCOMP_.comp.setprefix(oldname)
 
         # install callbacks to update HAL pins
@@ -348,6 +348,7 @@ class VersaProbeParent(QtWidgets.QWidget, _HalWidgetBase):
         if self.proc is not None:
             LOG.info("Probe Routine processor is busy")
             return
+        ACTION.RECORD_CURRENT_MODE()
         self.start_process()
         string_to_send = cmd + '$' + json.dumps(self.send_dict) + '\n'
         #print("String to send ", string_to_send)
@@ -371,6 +372,7 @@ class VersaProbeParent(QtWidgets.QWidget, _HalWidgetBase):
         LOG.info(("Probe Process finished - exitCode {} exitStatus {}".format(exitCode, exitStatus)))
         self.proc = None
         STATUS.unblock_error_polling()
+        ACTION.RESTORE_RECORDED_MODE()
 
     def parse_input(self, line):
         line = line.decode("utf-8")

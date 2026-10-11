@@ -20,7 +20,7 @@
 #include "emctool.h"
 #include "canon_position.hh"
 #include <emcmotcfg.h> // Just for EMCMOT_NUM_SPINDLES
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 
 /*
   This is the header file that all applications that use the
@@ -155,6 +155,9 @@ typedef struct CanonConfig_t {
           rotary_unlock_for_traverse(-1),
           g5xOffset{},
           g92Offset{},
+          g68Offset{},
+          g68Rotation{1, 0, 0, 0, 1, 0, 0, 0, 1},
+          g68Active(0),
           endPoint{},
           lengthUnits(CANON_UNITS_INCHES),
           activePlane(CANON_PLANE::XY),
@@ -178,6 +181,11 @@ typedef struct CanonConfig_t {
 
     CANON_POSITION g5xOffset;
     CANON_POSITION g92Offset;
+/* The tilted work plane (G68.2): a frame inside the G92 stage of the chain,
+   in mm.  Program X Y Z go through R * xyz + O before anything else. */
+    double g68Offset[3];
+    double g68Rotation[9];      // row major
+    int g68Active;
 /*
   canonEndPoint is the last programmed end point, stored in case it's
   needed for subsequent calculations. It's in absolute frame, mm units.
@@ -242,6 +250,19 @@ extern void SET_G92_OFFSET(double x, double y, double z,
                            double u, double v, double w);
 
 extern void SET_XY_ROTATION(double t);
+
+/* G28.2: trigger the machine homing cycle from G-code (bare form = all
+ * joints, in HOME_SEQUENCE order). Maps to EMC_JOINT_HOME(-1). */
+extern void HOME_CYCLE(void);
+/* G28.2 Pn: home a single joint by its 0-based joint number (matching
+ * [JOINT_n] INI section numbering). Maps to EMC_JOINT_HOME(joint). */
+extern void HOME_CYCLE_JOINT(int joint);
+
+/* The tilted work plane.  Origin in program units and a row major rotation
+   matrix, both in the coordinate system active when the plane was defined;
+   active 0 cancels it. */
+extern void SET_G68_FRAME(double x, double y, double z,
+                          const double rotation[9], int active);
 
 /* Offset the origin to the point with absolute coordinates x, y, z,
 a, b, c, u, v, and w. Values of x, y, z, a, b, c, u, v, and w are real 
@@ -399,7 +420,11 @@ extern void SET_FEED_MODE(int spindle, int mode);
  * inches per revolution (G20 in effect) or mm per minute (G21 in effect)
  * The spindle number indicates which spindle the movement is synchronised to */
 
-extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance);
+/* G64_R_PLANNER: two optional trailing args fold the planner mode (G64 R word)
+ * into the existing control-mode call. Defaults -1/-1.0 = "leave unchanged",
+ * so existing callers (G61, G61.1, cutter-comp save/restore) are unaffected. */
+extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance,
+                                    int planner_type = -1, double scurve_peak_scale = -1.0);
 
 extern void SET_NAIVECAM_TOLERANCE(double tolerance);
 
@@ -428,7 +453,7 @@ extern void STOP_CUTTER_RADIUS_COMPENSATION();
 translation commands. */
 
 /* used for threading */
-extern void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode);
+extern void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode, double angle_degrees = 0.0);
 extern void STOP_SPEED_FEED_SYNCH();
 
 
@@ -639,7 +664,7 @@ This is usually given in rpm and refers to the rate of spindle
 rotation. If the spindle is already turning and is at a different
 speed, change to the speed given with this command. */
 
-extern void STOP_SPINDLE_TURNING(int spindle);
+extern void STOP_SPINDLE_TURNING(int spindle, int wait_for_atspeed = 1);
 
 /* Stop the spindle from turning. If the spindle is already stopped, this
 command may be given, but it will have no effect. */
@@ -730,6 +755,8 @@ extern void ENABLE_FEED_OVERRIDE();
 /* used to deactivate user control of spindle speed override */
 extern void DISABLE_SPEED_OVERRIDE(int spindle);
 extern void ENABLE_SPEED_OVERRIDE(int spindle);
+/* hold the override at whatever is in effect when the next move starts */
+extern void LOCK_SPEED_OVERRIDE(int spindle);
 
 /* used to deactivate user control of feed hold */
 extern void DISABLE_FEED_HOLD();
@@ -870,6 +897,14 @@ below.
 extern double GET_EXTERNAL_ANGLE_UNIT_FACTOR();
 */
 
+// Returns the maximum velocity of one axis, indexed 0-8 as XYZABCUVW, in
+// program units per minute, or zero if that limit is not available
+extern double GET_EXTERNAL_AXIS_MAX_VELOCITY(int axis);
+
+// Returns the maximum forward speed of one spindle, in RPM, or zero if that
+// limit is not available
+extern double GET_EXTERNAL_SPINDLE_MAX_VELOCITY(int spindle);
+
 // Returns the system feed rate
 extern double GET_EXTERNAL_FEED_RATE();
 
@@ -892,6 +927,19 @@ extern int GET_EXTERNAL_MIST();
 
 // Returns the current motion control mode
 extern CANON_MOTION_MODE GET_EXTERNAL_MOTION_CONTROL_MODE();
+
+// Returns the kinematics type motion is running (G12.1, G13.1)
+extern int GET_EXTERNAL_KINS_TYPE();
+/* what the kinematics module says a type is (KINSTYPE_* flags,
+   kinematics.h); -1 where it says nothing: no such type, plain
+   kinematics, or no motion controller attached (sai, preview) */
+extern int GET_EXTERNAL_KINS_TYPE_FLAGS(int ktype);
+
+/* The tilted work plane the machine last executed, in the form
+   SET_G68_FRAME takes: 1 with origin and rotation filled in, 0 when there
+   is none or the coordinate system under it is no longer the one the
+   interpreter has, -1 when there is no machine to ask (sai, preview). */
+extern int GET_EXTERNAL_G68_FRAME(double origin[3], double rotation[9]);
 
 // Returns the current motion path-following tolerance
 extern double GET_EXTERNAL_MOTION_CONTROL_TOLERANCE();
@@ -1065,5 +1113,8 @@ extern void CANON_ERROR(const char *fmt, ...) __attribute__((format(printf,1,2))
 extern int     GET_EXTERNAL_OFFSET_APPLIED();
 extern EmcPose GET_EXTERNAL_OFFSETS();
 extern void UPDATE_TAG(const StateTag& tag);
+
+// adjust kins offset (G12.1 kinematics switch)
+extern void SELECT_KINS_TYPE(int switchkins_type);
 
 #endif				/* ifndef CANON_HH */

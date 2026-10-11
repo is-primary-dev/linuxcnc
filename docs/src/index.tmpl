@@ -15,32 +15,9 @@
   <img src="../linuxcnc-logo-chips.png" alt="LinuxCNC Logo" width="175"/>
 </div>
 
-@TRANSLATIONS@
-<p>Translations:
-<a href="../ar/">Arabic</a>
-<a href="../de/">Deutsch</a>
-<a href="../es/">Espa&ntilde;ol</a>
-<a href="../fr/">Français</a>
-<a href="../nb/">Norsk bokm&aring;l</a>
-<a href="../ru/">Russian</a>
-<a href="../sv/">Svensk</a>
-<!-- <a href="../ta/">Tamil</a> -->
-<a href="../uk/">Ukranian</a>
-<a href="../zh_CN/">中文</a>
-</p>
-@ENDTRANSLATIONS@
-
 <!-- <h3 align="center">LinuxCNC version <strong>@VERSION@</strong></h3>
 <h2>Documentation</h2> -->
 <h2>LinuxCNC version <strong>@VERSION@</strong> Documentation</h2>
-
-<div style="margin-top: 0em; margin-bottom: 1em; line-height: 150%">
-<p><a href="https://linuxcnc.org">LinuxCNC Home Page</a>  &bull;
-<a href="https://wiki.linuxcnc.org/cgi-bin/wiki.pl">Wiki</a> &bull;
-<a href="https://forum.linuxcnc.org">Forum</a> &bull;
-<a href="https://github.com/LinuxCNC/linuxcnc">Source</a> &bull;
-<a href="gcode.html">G-Code Quick Reference</a></p>
-</div>
 
 <h3>Getting Started &amp; Configuration</h3>
 
@@ -130,21 +107,15 @@
 <div class="details-list">
 	<ul>
 		<li><a href="hal/parallel-port.html">Parallel Port Driver</a></li>
-		<li><a href="drivers/ax5214h.html">AX5214H Driver</a></li>
 		<li><a href="drivers/gm.html">General Mechatronics GM6-PCI Driver</a></li>
 		<li><a href="drivers/gs2.html">GS2 Driver</a></li>
 		<li><a href="drivers/hal_gpio.html">Generic GPIO Driver using libgpiod</a></li>
 		<li><a href="drivers/hal_pi_gpio.html">Raspberry Pi GPIO Driver</a></li>
 		<li><a href="drivers/hostmot2.html">Mesa HostMot2 Driver</a></li>
 		<li><a href="drivers/mb2hal.html">Modbus to HAL Driver</a></li>
-		<li><a href="drivers/mesa_modbus.html">Modbus framework for Mesa cards</a></li>
 		<li><a href="drivers/mitsub-vfd.html">Mitsubishi VFD Driver</a></li>
-		<li><a href="drivers/motenc.html">Motenc Driver</a></li>
-		<li><a href="drivers/opto22.html">Opto22 Driver</a></li>
 		<li><a href="drivers/pico-ppmc.html">Pico Drivers</a></li>
-		<li><a href="drivers/pluto-p.html">Pluto P Driver</a></li>
 		<li><a href="drivers/pmx485.html">Powermax Modbus Driver</a></li>
-		<li><a href="drivers/servo-to-go.html">Servo To Go Driver</a></li>
 		<li><a href="drivers/shuttle.html">ShuttleXpress and ShuttlePRO Driver</a></li>
 		<li><a href="drivers/vfs11.html">VFS11 Driver</a></li>
 	</ul>
@@ -181,10 +152,12 @@
 <div class="details-list">
 	<ul>
 		<li><a href="motion/kinematics.html">Kinematics</a></li>
+		<li><a href="motion/kinematics-conventions.html">Kinematics Conventions</a></li>
 		<li><a href="motion/dh-parameters.html">DH Parameters</a></li>
 		<li><a href="motion/5-axis-kinematics.html">5-Axis-Kinematics</a></li>
 		<li><a href="motion/switchkins.html">Switchable Kinematics</a></li>
 		<li><a href="motion/pid-theory.html">PID theory</a></li>
+		<li><a href="motion/dual-pid-example.html">Dual PID Example</a></li>
 		<li><a href="remap/remap.html">Remap: Extending LinuxCNC</a></li>
 		<li><a href="config/moveoff.html">Moveoff Component</a></li>
 		<li><a href="code/rs274.html">Stand Alone Interpreter</a></li>
@@ -268,11 +241,11 @@
 
 <details>
 <summary>User Interface Programming</summary>
-<div class="details-list">
+<div class="details-list" id="uip">
 	<ul>
 		<li><a href="gui/panelui.html">Panelui</a></li>
-		<li><a href="config/python-interface.html">LinuxCNC Python Module</a></li>
-		<li><a href="config/python-hal-interface.html">HAL Python Module</a></li>
+		<li><a href="config/python-interface.html">LinuxCNC Python Module (API doc)</a></li>
+		<li><a href="config/python-hal-interface.html">HAL Python Module (API doc)</a></li>
 		<li><a href="gui/gstat.html">GStat Python Module</a></li>
 		<li><a href="gui/vismach.html">Vismach Virtual Machines</a></li>
 	</ul>
@@ -293,6 +266,7 @@
 		<li><a href="code/contributing-to-linuxcnc.html">Contributing to LinuxCNC</a></li>
 		<li><a href="code/writing-tests.html">Writing tests for LinuxCNC</a></li>
 		<li><a href="code/building-linuxcnc.html">Building LinuxCNC</a></li>
+		<li>See also <a href="#uip">User Interface Programming</a></li>
 	</ul>
 </div>
 </details>

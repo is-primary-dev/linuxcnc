@@ -264,7 +264,7 @@ if test "$RTS" = uspace || test -z "$RTS" -a "$RTAI_CONFIG" = "none" ; then
     CONFIG_USPACE_XENOMAI_EVL=y
     XENOMAI_EVL_CFLAGS=
     XENOMAI_EVL_LDFLAGS=-levl
-    AC_DEFINE([USPACE_XENOMAI_EVL], [], [Define if uspace realtime should optionally support Xenomai-evl])
+    AC_DEFINE([USPACE_XENOMAI_EVL], [], [Define if uspace realtime should optionally support Xenomai EVL])
   fi
 
   AC_SUBST([CONFIG_USPACE_XENOMAI_EVL])
@@ -690,6 +690,21 @@ AC_DEFINE_UNQUOTED([EMC2_DEFAULT_TOOLTABLE], "$DEFAULT_TOOLTABLE", [Default nml 
 # we decide based on RIP or install where stuff goes                         #
 ##############################################################################
 
+AC_ARG_WITH([tcl-dir],
+    [AS_HELP_STRING([--with-tcl-dir=DIR],
+        [directory for LinuxCNC Tcl scripts (default: auto-detected from tcl_pkgPath)])],
+    [EMC2_TCL_DIR="$withval"],
+    [TCL_GET_DIR=$(echo [['set d [lindex [lsearch -all -inline -glob $tcl_pkgPath /usr/share/*] 0]; if {$d eq ""} {set d [lindex [lsearch -all -inline -glob $tcl_pkgPath /usr/lib*] 0]}; puts $d']] | tclsh 2>/dev/null)
+     AS_IF([test -z "$TCL_GET_DIR"],
+           [
+            if test "$BUILD_GUI" = "yes"; then
+                AC_MSG_ERROR([could not determine Tcl package dir from tcl_pkgPath])
+            else
+                TCL_GET_DIR="${libdir}/tcltk"
+            fi
+           ])
+     EMC2_TCL_DIR="$TCL_GET_DIR/linuxcnc"])
+
 fe () {
     # Fully expand argument.  Example:
     # ${datadir} -> ${datarootdir} -> ${prefix}/share -> /usr/local
@@ -712,7 +727,7 @@ if test "xyes" = "x$RUN_IN_PLACE"; then
     EMC2_PO_DIR=$EMC2_HOME/share/locale
     EMC2_HELP_DIR=$EMC2_HOME/docs/help
     EMC2_RTLIB_DIR=$EMC2_HOME/rtlib
-    LINUXCNC_CONFIG_PATH="~/linuxcnc/configs:$EMC2_HOME/configs"
+    LINUXCNC_CONFIG_PATH="\$HOME/linuxcnc/configs:$EMC2_HOME/configs"
     LINUXCNC_CONFIG_PATH_TCL="$::env(HOME)/linuxcnc/configs:$EMC2_HOME/configs"
     EMC2_NCFILES_DIR=$EMC2_HOME/nc_files
     REALTIME=$EMC2_HOME/scripts/realtime
@@ -726,16 +741,15 @@ else
     EMC2_SCRIPT=$EMC2_BIN_DIR/linuxcnc
     EMC2_SUFFIX=""
     EMC2_ICON=linuxcncicon
-    EMC2_TCL_DIR=${prefix}/lib/tcltk/linuxcnc
-    EMC2_TCL_LIB_DIR=${prefix}/lib/tcltk/linuxcnc
-    EMC2_LANG_DIR=${prefix}/lib/tcltk/linuxcnc/msgs
+    EMC2_TCL_LIB_DIR="${EMC2_TCL_DIR}"
+    EMC2_LANG_DIR="${EMC2_TCL_DIR}/msgs"
     EMC2_PO_DIR=${prefix}/share/locale
     EMC2_HELP_DIR=${prefix}/share/doc/linuxcnc
     case $MODULE_DIR in
         */linuxcnc*) EMC2_RTLIB_DIR=$MODULE_DIR ;;
 	*) EMC2_RTLIB_DIR=$MODULE_DIR/linuxcnc
     esac
-    LINUXCNC_CONFIG_PATH="~/linuxcnc/configs:/usr/local/etc/linuxcnc/configs:"$(eval echo $EMC2_HELP_DIR)"/examples/sample-configs"
+    LINUXCNC_CONFIG_PATH="\$HOME/linuxcnc/configs:/usr/local/etc/linuxcnc/configs:"$(eval echo $EMC2_HELP_DIR)"/examples/sample-configs"
     LINUXCNC_CONFIG_PATH_TCL="$::env(HOME)/linuxcnc/configs:/usr/local/etc/linuxcnc/configs:"$(eval echo $EMC2_HELP_DIR)"/examples/sample-configs"
     EMC2_NCFILES_DIR=${prefix}/share/linuxcnc/ncfiles
     REALTIME=${prefix}/lib/linuxcnc/realtime
@@ -802,6 +816,12 @@ else
 fi
 
 
+AC_ARG_ENABLE(gui,
+    AS_HELP_STRING([--disable-gui], [Disable building graphical user interfaces (Tk, Tcl, X11, Xinerama, GTK)]),
+    [BUILD_GUI=$enableval],
+    [BUILD_GUI=yes])
+AC_SUBST([BUILD_GUI])
+
 AC_ARG_ENABLE(gtk,
     AS_HELP_STRING(
         [--disable-gtk],
@@ -815,7 +835,7 @@ AC_ARG_ENABLE(gtk,
 	    BUILD_GTK=no ;;
 	esac
     ],
-    [BUILD_GTK=yes])
+    [BUILD_GTK=$BUILD_GUI])
 
 if test "$BUILD_GTK" = "yes"; then
   AC_MSG_CHECKING([for GTK 3.22.4 or above])
@@ -929,7 +949,7 @@ AC_SUBST(YAPPS)
 AC_PATH_PROG(MANDB, mandb, "")
 
 AC_PATH_PROG(INTLTOOL_EXTRACT, intltool-extract, "none", $SPATH)
-if test $INTLTOOL_EXTRACT = "none"
+if test "$INTLTOOL_EXTRACT" = "none"
 then
     AC_MSG_ERROR([intltool-extract not found])
 fi
@@ -1067,12 +1087,22 @@ AC_ARG_ENABLE(build-documentation,
 # --enable-build-documentation=html).  =html itself warn-and-disables
 # only the missing PDF tools; users who want PDF best-effort can pass
 # =html and rebuild after installing the missing tools.
+AC_ARG_ENABLE(manpages,
+    AS_HELP_STRING([--disable-manpages], [Disable building man pages]),
+    [BUILD_MANPAGES=$enableval],
+    [BUILD_MANPAGES=yes])
+AC_SUBST([BUILD_MANPAGES])
+
 # halcompile manpages need asciidoctor regardless of BUILD_DOCS.
 AC_PATH_PROG(ASCIIDOCTOR,asciidoctor,"none")
 if ( test "none" = "$ASCIIDOCTOR" ) ; then
-    AC_MSG_ERROR([no asciidoctor, manpages cannot be built
+    if ( test "x$BUILD_MANPAGES" = "xyes" ) ; then
+        AC_MSG_ERROR([no asciidoctor, manpages cannot be built
 install with "sudo apt-get install asciidoctor" on Debian / Ubuntu,
 "sudo dnf install rubygem-asciidoctor" on Fedora, or "gem install asciidoctor"])
+    else
+        AC_MSG_NOTICE([asciidoctor not found, bypassing manpage build...])
+    fi
 fi
 
 if ( test "$BUILD_DOCS" = "yes" ) ; then
@@ -1204,16 +1234,6 @@ For a fully custom path, set the var directly:
     fi
     AC_SUBST(NOTOCJK_REGULAR_TTC)
     AC_SUBST(NOTOCJK_BOLD_TTC)
-    fi
-fi
-
-# Programs required only for building the HTML documentation
-if ( test "$BUILD_DOCS_HTML" = "yes" ) ; then
-    AC_PATH_PROG(CHECKLINK,checklink,"none")
-    if ( test "none" = "$CHECKLINK" ) ; then
-        AC_MSG_WARN([no checklink, HTML documentation cannot be built
-install with "sudo apt-get install w3c-linkchecker"])
-        BUILD_DOCS_HTML=no
     fi
 fi
 
@@ -1364,6 +1384,8 @@ AH_BOTTOM(#endif
 # so testing is done by finding tclConfig.sh and tkConfig.sh                 #
 # if the search fails the traditional check is done                          #
 ##############################################################################
+if test "$BUILD_GUI" = "yes"; then
+
 AC_MSG_CHECKING([for tcl])
 
 AC_ARG_WITH(tclConfig,
@@ -1520,6 +1542,11 @@ install with "sudo apt-get install python3-gi"])
     fi
 fi
 
+else
+    TCLSH=tclsh
+    WISH=wish
+fi
+
 AC_SUBST([TCL_DBGX])
 AC_SUBST([TK_DBGX])
 AC_SUBST([TCL_CFLAGS])
@@ -1555,7 +1582,9 @@ AC_CHECK_LIB(Xinerama, XineramaQueryExtension,
 	    [HAVE_XINERAMA=no])
 
 if test "x$HAVE_XINERAMA" = "xno"; then
-    AC_MSG_ERROR([Xinerama library or headers not found])
+    if test "$BUILD_GUI" = "yes"; then
+        AC_MSG_ERROR([Xinerama library or headers not found])
+    fi
 fi
 
 #clean out LIBS
@@ -1567,6 +1596,16 @@ AC_CHECK_HEADERS([fmt/format.h],[HAVE_LIBFMT=yes],[HAVE_LIBFMT=no])
 AC_LANG_POP([C++])
 if test "x$HAVE_LIBFMT" = "xno"; then
     AC_MSG_ERROR([libfmt header not found. Install with 'sudo apt-get install libfmt-dev'])
+fi
+
+AC_LANG_PUSH([C++])
+CPPFLAGS_SAVED="$CPPFLAGS"
+CPPFLAGS="$PYTHON_CPPFLAGS $CPPFLAGS"
+AC_CHECK_HEADERS([pybind11/pybind11.h],[HAVE_PYBIND11=yes],[HAVE_PYBIND11=no])
+CPPFLAGS="$CPPFLAGS_SAVED"
+AC_LANG_POP([C++])
+if test "x$HAVE_PYBIND11" = "xno"; then
+    AC_MSG_ERROR([pybind11 header not found. Install with 'sudo apt-get install python3-pybind11'])
 fi
 
 AC_CHECK_HEADERS([sys/capability.h], [], [
@@ -1659,6 +1698,7 @@ then
 fi
 AC_MSG_RESULT(OK)
 
+if test "$BUILD_GUI" = "yes"; then
 AC_MSG_CHECKING([match between tk and Tkinter versions])
 if $PYTHON -c 'import sys;raise SystemExit(sys.hexversion<0x3040000)'
 then
@@ -1683,11 +1723,13 @@ if test "$PYTHON_TK_VERSION" != "$TK_VERSION"; then
     AC_MSG_ERROR(["Python requires use of Tk $TK_VERSION.  Install this version and specify --with-tkConfig if necessary"])
 fi
 AC_MSG_RESULT([$PYTHON_TK_VERSION])
+fi
 
 AC_MSG_CHECKING(for site-package location)
-SITEPY=`$PYTHON -c "import sysconfig; s=sysconfig.get_scheme_names(); print(sysconfig.get_path('platlib', 'deb_system' if 'deb_system' in s else 'rpm_prefix' if 'rpm_prefix' in s else sysconfig.get_default_scheme()))"`
+SITEPY=`$PYTHON -c "import sysconfig; s=sysconfig.get_scheme_names(); print(next((sysconfig.get_path('platlib', m) for m in ('deb_system', 'rpm_prefix') if m in s), '/usr/lib/python3/dist-packages'))"`
 AC_MSG_RESULT($SITEPY)
 
+if test "$BUILD_GUI" = "yes"; then
 AC_MSG_CHECKING(for working GLU quadrics)
 AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 #include <GL/gl.h>
@@ -1699,6 +1741,7 @@ AC_COMPILE_IFELSE([AC_LANG_PROGRAM([[
 
 AC_MSG_CHECKING(for Xmu headers)
 AC_CHECK_HEADERS(X11/Xmu/Xmu.h,[],[AC_MSG_ERROR([Required Xmu header missing.  Install it, or specify --disable-python to skip the parts of LinuxCNC that depend on Python])])
+fi
 
 AC_SUBST([LIBPYTHON])
 AC_SUBST([SITEPY])
@@ -1719,6 +1762,19 @@ add_to_cflags() {
 
 # Always add -Wextra
 add_to_cflags "-Wextra"
+
+# Add option to enable warnings when integer 0 is used to act
+# as NULL or nullptr in assignment or comparison.
+AC_ARG_ENABLE(wzero-as-null-pointer-constant,
+    AS_HELP_STRING(
+      [--enable-wzero-as-null-pointer-constant],
+      [Warn on zero being used as NULL pointer constant (-Wzero-as-null-pointer-constant).],
+    ),
+    [
+      case "$enableval" in
+        (yes) add_to_cflags "-Wzero-as-null-pointer-constant" ;;
+      esac
+    ])
 
 # The last thing before subst-exporting CFLAGS and CXXFLAGS is to add -Werror
 # if requested. Doing it earlier causes conf-tests to fail that are supposed to
@@ -1753,7 +1809,6 @@ AC_CONFIG_FILES([../scripts/halcmd_twopass], [chmod +x ../scripts/halcmd_twopass
 AC_CONFIG_FILES([../scripts/realtime], [chmod +x ../scripts/realtime])
 AC_CONFIG_FILES([../scripts/runtests], [chmod +x ../scripts/runtests])
 AC_CONFIG_FILES([../scripts/linuxcnc_var], [chmod +x ../scripts/linuxcnc_var])
-AC_CONFIG_FILES([../scripts/linuxcnc-checklink], [chmod +x ../scripts/linuxcnc-checklink])
 AC_CONFIG_FILES(Makefile.inc)
 AC_CONFIG_FILES(Makefile.modinc)
 AC_CONFIG_FILES(../tcl/linuxcnc.tcl)

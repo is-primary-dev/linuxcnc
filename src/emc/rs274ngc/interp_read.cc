@@ -22,14 +22,13 @@
 #include <ctype.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sstream>
+#include <charconv>
+#include <string>
 #include "rs274ngc.hh"
 #include "rs274ngc_return.hh"
 #include "interp_internal.hh"
 #include "rs274ngc_interp.hh"
-#include <rtapi_math.h>
 #include <cmath>
-#include <rtapi_string.h>	// rtapi_strlcpy()
 
 using namespace interp_param_global;
 
@@ -740,7 +739,9 @@ int Interp::read_integer_unsigned(char *line,    //!< string: line of RS274 code
       break;
   }
   CHKS((n == *counter), NCE_BAD_FORMAT_UNSIGNED_INTEGER);
-  if (sscanf(line + *counter, "%d", integer_ptr) == 0)
+  // the digits are already delimited above, so from_chars needs no sscanf
+  std::from_chars_result r = std::from_chars(line + *counter, line + n, *integer_ptr);
+  if (r.ec != std::errc())
     ERS(NCE_SSCANF_FAILED);
   *counter = n;
   return INTERP_OK;
@@ -1206,7 +1207,7 @@ int Interp::read_one_item(
   CHKS(((letter < ' ') || (letter > 'z')),
 	_("Bad character '\\%03o' used"), (unsigned char)letter);
   function_pointer = _readers[(int) letter]; /* Find the function pointer in the array */
-  CHKS((function_pointer == 0),
+  CHKS((function_pointer == NULL),
 	(!isprint(letter) || isspace(letter)) ?
 	    _("Bad character '\\%03o' used") : _("Bad character '%c' used"), letter);
   CHP((*this.*function_pointer)(line, counter, block, parameters)); /* Call the function */ 
@@ -1597,7 +1598,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
 	  // context
           if (strlen(_setup.sub_context[_setup.call_level].subName) >= sizeof(oNameBuf))
               ERS(NCE_UNABLE_TO_OPEN_FILE, _setup.sub_context[_setup.call_level].subName);
-	  rtapi_strlcpy(oNameBuf, _setup.sub_context[_setup.call_level].subName,
+	  rs274ngc_strlcpy(oNameBuf, _setup.sub_context[_setup.call_level].subName,
                   sizeof(oNameBuf));
       } else
 	  // any other m-code should have been handled by read_m()
@@ -1733,7 +1734,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
   else if ((block->o_type == O_endsub) || (block->o_type == O_return) ||
 	   (block->o_type == M_99))
     {
-	if ((_setup.skipping_o != 0) &&
+	if ((_setup.skipping_o != NULL) &&
 	    (0 != strcmp(_setup.skipping_o, block->o_name))) {
 	    return INTERP_OK;
 	}
@@ -1761,7 +1762,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
     {
       // we need to NOT evaluate parameters if skipping
       // skipping never ends on a "call"
-      if(_setup.skipping_o != 0)
+      if(_setup.skipping_o != NULL)
       {
           block->o_type = O_none;
           return INTERP_OK;
@@ -1809,7 +1810,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
   else if(block->o_type == O_while)
     {
       // TESTME !!!KL -- should not eval expressions if skipping ???
-      if((_setup.skipping_o != 0) &&
+      if((_setup.skipping_o != NULL) &&
 	 (0 != strcmp(_setup.skipping_o, block->o_name)))
       {
 	    return INTERP_OK;
@@ -1824,7 +1825,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
   else if(block->o_type == O_repeat)
       {
           // TESTME !!!KL -- should not eval expressions if skipping ???
-          if((_setup.skipping_o != 0) &&
+          if((_setup.skipping_o != NULL) &&
 	     (0 != strcmp(_setup.skipping_o, block->o_name)))
           {
 	    return INTERP_OK;
@@ -1839,7 +1840,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
   else if(block->o_type == O_if)
     {
       // TESTME !!!KL -- should not eval expressions if skipping ???
-      if((_setup.skipping_o != 0) &&
+      if((_setup.skipping_o != NULL) &&
 	 (0 != strcmp(_setup.skipping_o, block->o_name)))
       {
 	    return INTERP_OK;
@@ -1854,7 +1855,7 @@ int Interp::read_o(    /* ARGUMENTS                                     */
   else if(block->o_type == O_elseif)
     {
       // TESTME !!!KL -- should not eval expressions if skipping ???
-      if((_setup.skipping_o != 0) &&
+      if((_setup.skipping_o != NULL) &&
 	 (0 != strcmp(_setup.skipping_o, block->o_name)))
       {
 	    return INTERP_OK;
@@ -2185,7 +2186,7 @@ int Interp::read_parameter_setting(
                _setup.named_parameter_occurrence, param, value);
 
       dup = strstore(param); // no more need to free this
-      if(dup == 0)
+      if(dup == NULL)
       {
           ERS(NCE_OUT_OF_MEMORY);
       }
@@ -2749,14 +2750,25 @@ int Interp::read_real_number(char *line, //!< string: line of RS274/NGC code bei
 
   start = line + *counter;
 
-  after = strspn(start, "+-");
-  after = strspn(start+after, "0123456789.") + after;
+  size_t signs = strspn(start, "+-");
+  after = strspn(start+signs, "0123456789.") + signs;
 
-  std::string st(start, start+after);
-  std::stringstream s(st);
-  double val;
-  if(!(s >> val)) ERS(_("bad number format (conversion failed) parsing '%s'"), st.c_str());
-  if(s.get() != std::char_traits<char>::eof()) ERS(_("bad number format (trailing characters) parsing '%s'"), st.c_str());
+  const char *first = start + ((signs == 1 && *start == '+') ? 1 : 0);
+  const char *last = start + after;
+  double val = 0;
+  std::from_chars_result r{first, std::errc::invalid_argument};
+  if (signs <= 1) r = std::from_chars(first, last, val);
+
+  if (r.ec != std::errc()) {
+    // No number there, or a magnitude that does not fit a double; the stream
+    // conversion set failbit for the former and for an overflow.
+    std::string st(start, after);
+    ERS(_("bad number format (conversion failed) parsing '%s'"), st.c_str());
+  }
+  if (r.ptr != last) {
+    std::string st(start, after);
+    ERS(_("bad number format (trailing characters) parsing '%s'"), st.c_str());
+  }
 
   *double_ptr = val;
   *counter = start + after - line;
@@ -3166,7 +3178,7 @@ int Interp::read_text(
          index--) { // remove space at end of raw_line, especially CR & LF
       raw_line[index] = 0;
     }
-    rtapi_strlcpy(line, raw_line, LINELEN);
+    rs274ngc_strlcpy(line, raw_line, LINELEN);
     CHP(close_and_downcase(line));
     if ((line[0] == '%') && (line[1] == 0) && (_setup.percent_flag)) {
         FINISH();
@@ -3174,8 +3186,8 @@ int Interp::read_text(
     }
   } else {
     CHKS((strlen(command) >= LINELEN), NCE_COMMAND_TOO_LONG);
-    rtapi_strlcpy(raw_line, command, LINELEN);
-    rtapi_strlcpy(line, command, LINELEN);
+    rs274ngc_strlcpy(raw_line, command, LINELEN);
+    rs274ngc_strlcpy(line, command, LINELEN);
     CHP(close_and_downcase(line));
   }
 

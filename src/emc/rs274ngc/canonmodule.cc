@@ -18,6 +18,7 @@
  */
 #define BOOST_PYTHON_MAX_ARITY 13
 #include <boost/python/def.hpp>
+#include <boost/python/args.hpp>
 #include <boost/python/module.hpp>
 #include <boost/python/scope.hpp>
 #include <boost/python/enum.hpp>
@@ -36,6 +37,8 @@ static void wrap_canon_error(const char *s)
 }
 
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wzero-as-null-pointer-constant"
 BOOST_PYTHON_MODULE(emccanon) {
     using namespace boost::python;
     scope().attr("__doc__") =
@@ -116,6 +119,7 @@ BOOST_PYTHON_MODULE(emccanon) {
     def("ENABLE_FEED_HOLD",&ENABLE_FEED_HOLD);
     def("ENABLE_FEED_OVERRIDE",&ENABLE_FEED_OVERRIDE);
     def("ENABLE_SPEED_OVERRIDE",&ENABLE_SPEED_OVERRIDE);
+    def("LOCK_SPEED_OVERRIDE",&LOCK_SPEED_OVERRIDE);
     def("FINISH",&FINISH);
     def("ON_RESET", &ON_RESET);
     def("FLOOD_OFF",&FLOOD_OFF);
@@ -176,6 +180,8 @@ BOOST_PYTHON_MODULE(emccanon) {
     def("GET_EXTERNAL_TOOL_LENGTH_ZOFFSET",&GET_EXTERNAL_TOOL_LENGTH_ZOFFSET);
     def("GET_EXTERNAL_TOOL_SLOT",&GET_EXTERNAL_TOOL_SLOT);
     def("GET_EXTERNAL_TOOL_TABLE",&GET_EXTERNAL_TOOL_TABLE);
+    def("GET_EXTERNAL_AXIS_MAX_VELOCITY",&GET_EXTERNAL_AXIS_MAX_VELOCITY);
+    def("GET_EXTERNAL_SPINDLE_MAX_VELOCITY",&GET_EXTERNAL_SPINDLE_MAX_VELOCITY);
     def("GET_EXTERNAL_TRAVERSE_RATE",&GET_EXTERNAL_TRAVERSE_RATE);
     def("GET_OPTIONAL_PROGRAM_STOP",&GET_OPTIONAL_PROGRAM_STOP);
     def("INIT_CANON",&INIT_CANON);
@@ -224,7 +230,12 @@ BOOST_PYTHON_MODULE(emccanon) {
     def("SPINDLE_RETRACT",&SPINDLE_RETRACT);
     def("SPINDLE_RETRACT_TRAVERSE",&SPINDLE_RETRACT_TRAVERSE);
     def("START_CUTTER_RADIUS_COMPENSATION",&START_CUTTER_RADIUS_COMPENSATION);
-    def("START_SPEED_FEED_SYNCH",&START_SPEED_FEED_SYNCH);
+    // spell the arguments out so the C++ default for angle_degrees survives into
+    // Python: a bare function pointer would make the new argument mandatory and
+    // break every existing three-argument caller
+    def("START_SPEED_FEED_SYNCH",&START_SPEED_FEED_SYNCH,
+	(arg("spindle"), arg("feed_per_revolution"), arg("velocity_mode"),
+	 arg("angle_degrees")=0.0));
     def("START_SPINDLE_CLOCKWISE",&START_SPINDLE_CLOCKWISE);
     def("START_SPINDLE_COUNTERCLOCKWISE",&START_SPINDLE_COUNTERCLOCKWISE);
     def("STOP_CUTTER_RADIUS_COMPENSATION",&STOP_CUTTER_RADIUS_COMPENSATION);
@@ -269,3 +280,4 @@ BOOST_PYTHON_MODULE(emccanon) {
     def("GET_EXTERNAL_OFFSETS",&GET_EXTERNAL_OFFSETS);
 
 }
+#pragma GCC diagnostic pop

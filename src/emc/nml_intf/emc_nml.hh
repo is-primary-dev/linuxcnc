@@ -16,13 +16,13 @@
 #define EMC_NML_HH
 #include <linuxcnc.h>
 #include <emcpos.h>
+#include <kinematics.h>	// SWITCHKINS_MAX_TYPES
 #include "emc.hh"
-#include "libnml/rcs/rcs.hh"
 #include "libnml/nml/cmd_msg.hh"
 #include "libnml/nml/stat_msg.hh"
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 #include "canon.hh"		// CANON_TOOL_TABLE, CANON_UNITS
-#include "rs274ngc/rs274ngc.hh"		// ACTIVE_G_CODES, etc
+#include "interp_codes.h"		// ACTIVE_G_CODES, etc
 
 // ------------------
 // CLASS DECLARATIONS
@@ -285,6 +285,8 @@ class EMC_JOINT_SET_HOMING_PARAMS:public EMC_JOINT_CMD_MSG {
         home_final_vel(0.0),
         search_vel(0.0),
         latch_vel(0.0),
+        search_dist(0.0),
+        latch_dist(0.0),
         use_index(0),
         encoder_does_not_reset(0),
         ignore_limits(0),
@@ -305,6 +307,8 @@ class EMC_JOINT_SET_HOMING_PARAMS:public EMC_JOINT_CMD_MSG {
     double home_final_vel;
     double search_vel;
     double latch_vel;
+    double search_dist;
+    double latch_dist;
     int use_index;
     int encoder_does_not_reset;
     int ignore_limits;
@@ -657,7 +661,7 @@ class EMC_TRAJ_SET_SO_ENABLE:public EMC_TRAJ_CMD_MSG {
     void update(CMS * cms);
 
     int spindle;
-    unsigned char mode; //mode=0, override off (will work with 100% SO), mode != 0, override on, user can change SO
+    unsigned char mode; //EMC_SO_OVERRIDE_OFF, _ON or _LOCK
 };
 
 class EMC_TRAJ_SET_FH_ENABLE:public EMC_TRAJ_CMD_MSG {
@@ -673,42 +677,6 @@ class EMC_TRAJ_SET_FH_ENABLE:public EMC_TRAJ_CMD_MSG {
     void update(CMS * cms);
 
     unsigned char mode; //mode=0, override off (feedhold is disabled), mode != 0, override on, user can use feedhold
-};
-
-class EMC_TRAJ_ABORT:public EMC_TRAJ_CMD_MSG {
-  public:
-    EMC_TRAJ_ABORT()
-      : EMC_TRAJ_CMD_MSG(EMC_TRAJ_ABORT_TYPE, sizeof(EMC_TRAJ_ABORT))
-    {};
-
-    // For internal NML/CMS use only.
-    // Sub-class update() calls base-class update()
-    // cppcheck-suppress duplInheritedMember
-    void update(CMS * cms);
-};
-
-class EMC_TRAJ_PAUSE:public EMC_TRAJ_CMD_MSG {
-  public:
-    EMC_TRAJ_PAUSE()
-      : EMC_TRAJ_CMD_MSG(EMC_TRAJ_PAUSE_TYPE, sizeof(EMC_TRAJ_PAUSE))
-    {};
-
-    // For internal NML/CMS use only.
-    // Sub-class update() calls base-class update()
-    // cppcheck-suppress duplInheritedMember
-    void update(CMS * cms);
-};
-
-class EMC_TRAJ_RESUME:public EMC_TRAJ_CMD_MSG {
-  public:
-    EMC_TRAJ_RESUME()
-      : EMC_TRAJ_CMD_MSG(EMC_TRAJ_RESUME_TYPE, sizeof(EMC_TRAJ_RESUME))
-    {};
-
-    // For internal NML/CMS use only.
-    // Sub-class update() calls base-class update()
-    // cppcheck-suppress duplInheritedMember
-    void update(CMS * cms);
 };
 
 class EMC_TRAJ_DELAY:public EMC_TRAJ_CMD_MSG {
@@ -736,6 +704,7 @@ class EMC_TRAJ_LINEAR_MOVE:public EMC_TRAJ_CMD_MSG {
         ini_maxvel(0.0),
         acc(0.0),
         ini_maxjerk(0.0),
+        vlimit_scale(1.0),
         feed_mode(0),
         indexer_jnum(0)
     {};
@@ -748,6 +717,7 @@ class EMC_TRAJ_LINEAR_MOVE:public EMC_TRAJ_CMD_MSG {
     int type;
     EmcPose end;		// end point
     double vel, ini_maxvel, acc, ini_maxjerk;
+    double vlimit_scale;        // see emcmot_command_t
     int feed_mode;
     int indexer_jnum;
 };
@@ -765,6 +735,7 @@ class EMC_TRAJ_CIRCULAR_MOVE:public EMC_TRAJ_CMD_MSG {
         ini_maxvel(0.0),
         acc(0.0),
         ini_maxjerk(0.0),
+        vlimit_scale(1.0),
         feed_mode(0)
     {};
 
@@ -779,6 +750,7 @@ class EMC_TRAJ_CIRCULAR_MOVE:public EMC_TRAJ_CMD_MSG {
     int turn;
     int type;
     double vel, ini_maxvel, acc, ini_maxjerk;
+    double vlimit_scale;        // see emcmot_command_t
     int feed_mode;
 };
 
@@ -787,7 +759,9 @@ class EMC_TRAJ_SET_TERM_COND:public EMC_TRAJ_CMD_MSG {
     EMC_TRAJ_SET_TERM_COND()
       : EMC_TRAJ_CMD_MSG(EMC_TRAJ_SET_TERM_COND_TYPE, sizeof(EMC_TRAJ_SET_TERM_COND)),
         cond(false),
-        tolerance(0.0)
+        tolerance(0.0),
+        planner_type(-1),       /* G64_R_PLANNER: -1 = unchanged */
+        scurve_peak_scale(-1.0) /* G64_R_PLANNER: <0 = unchanged */
     {};
 
     // For internal NML/CMS use only.
@@ -798,6 +772,13 @@ class EMC_TRAJ_SET_TERM_COND:public EMC_TRAJ_CMD_MSG {
     int cond;
     double tolerance; // used to set the precision/tolerance of path deviation
 		      // during CONTINUOUS motion mode.
+    /* G64_R_PLANNER (fork extension): the optional G64 R word folds the planner
+     * request into the same control-mode message G64 already emits. -1 / <0
+     * means "not specified, leave unchanged". Applied in program order by task.
+     * planner_type carries INTENT, not an implementation: task resolves a
+     * smooth request (1) to the machine's [TRAJ]SMOOTH_PLANNER. */
+    int planner_type;        // 0 = trapezoidal, 1 = smooth (jerk-limited), -1 = unchanged
+    double scurve_peak_scale; // 0.1..1.0 cornering peak scale, <0 = unchanged
 };
 
 class EMC_TRAJ_SET_SPINDLESYNC:public EMC_TRAJ_CMD_MSG {
@@ -806,7 +787,8 @@ class EMC_TRAJ_SET_SPINDLESYNC:public EMC_TRAJ_CMD_MSG {
       : EMC_TRAJ_CMD_MSG(EMC_TRAJ_SET_SPINDLESYNC_TYPE, sizeof(EMC_TRAJ_SET_SPINDLESYNC)),
         spindle(0),
         feed_per_revolution(0.0),
-        velocity_mode(false)
+        velocity_mode(false),
+        angular_offset_degrees(0.0)
     {};
 
     // Sub-class update() calls base-class update()
@@ -816,6 +798,7 @@ class EMC_TRAJ_SET_SPINDLESYNC:public EMC_TRAJ_CMD_MSG {
     int spindle;
     double feed_per_revolution;
     bool velocity_mode;
+    double angular_offset_degrees; // spindle angle offset for threading start (D word, degrees)
 };
 
 class EMC_TRAJ_SET_OFFSET:public EMC_TRAJ_CMD_MSG {
@@ -879,6 +862,26 @@ class EMC_TRAJ_SET_ROTATION:public EMC_TRAJ_CMD_MSG {
     double rotation;
 };
 
+// the tilted work plane frame (G68.2, G68.3, G68.4, G69): origin in user
+// units and a rotation matrix, both in the coordinate system that was active
+// when the plane was defined
+class EMC_TRAJ_SET_G68:public EMC_TRAJ_CMD_MSG {
+  public:
+    EMC_TRAJ_SET_G68()
+      : EMC_TRAJ_CMD_MSG(EMC_TRAJ_SET_G68_TYPE, sizeof(EMC_TRAJ_SET_G68)),
+        origin{}, rotation{1, 0, 0, 0, 1, 0, 0, 0, 1}, active(0)
+    {};
+
+    // For internal NML/CMS use only.
+    // Sub-class update() calls base-class update()
+    // cppcheck-suppress duplInheritedMember
+    void update(CMS * cms);
+
+    EmcPose origin;
+    double rotation[9];         // row major
+    int active;
+};
+
 class EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG:public EMC_TRAJ_CMD_MSG {
   public:
     EMC_TRAJ_CLEAR_PROBE_TRIPPED_FLAG()
@@ -916,6 +919,7 @@ class EMC_TRAJ_PROBE:public EMC_TRAJ_CMD_MSG {
         ini_maxvel(0.0),
         acc(0.0),
         ini_maxjerk(0.0),
+        vlimit_scale(1.0),
         probe_type(0)
     {};
 
@@ -927,6 +931,7 @@ class EMC_TRAJ_PROBE:public EMC_TRAJ_CMD_MSG {
     EmcPose pos;
     int type;
     double vel, ini_maxvel, acc, ini_maxjerk;
+    double vlimit_scale;        // see emcmot_command_t
     unsigned char probe_type;
 };
 
@@ -951,13 +956,27 @@ class EMC_TRAJ_RIGID_TAP:public EMC_TRAJ_CMD_MSG {
     double vel, ini_maxvel, acc, scale, ini_maxjerk;
 };
 
+class EMC_TRAJ_SELECT_KINS:public EMC_TRAJ_CMD_MSG {
+  public:
+    EMC_TRAJ_SELECT_KINS():EMC_TRAJ_CMD_MSG(EMC_TRAJ_SELECT_KINS_TYPE,
+                        sizeof(EMC_TRAJ_SELECT_KINS)),
+        switchkins_type(0)
+    {};
+
+    int switchkins_type;
+
+    // For internal NML/CMS use only.
+    // Sub-class update() calls base-class update()
+    // cppcheck-suppress duplInheritedMember
+    void update(CMS * cms);
+};
+
 // EMC_TRAJ status base class
 class EMC_TRAJ_STAT_MSG:public RCS_STAT_MSG {
   public:
     EMC_TRAJ_STAT_MSG(NMLTYPE t, size_t s)
       : RCS_STAT_MSG(t, s)
     {};
-
     // For internal NML/CMS use only.
     void update(CMS * cms);
 };
@@ -1016,6 +1035,14 @@ class EMC_TRAJ_STAT:public EMC_TRAJ_STAT_MSG {
     //bool spindle_override_enabled; moved to SPINDLE_STAT
     bool adaptive_feed_enabled;
     bool feed_hold_enabled;
+
+    int switchkins_type;     // switchkins type now in force
+    int switchkins_seq;      // motion's request counter, echoed once seen
+    bool switchkins_changed; // a switch landed, task has yet to synch
+    int switchkins_flags[SWITCHKINS_MAX_TYPES]; // what each type is
+                             // (KINSTYPE_*), as the module declares it;
+                             // -1 for a type the module does not provide
+
     StateTag tag;
 };
 
@@ -1157,7 +1184,14 @@ class EMC_MOTION_STAT:public EMC_MOTION_STAT_MSG {
     EmcPose eoffset_pose;
     int numExtraJoints;
     bool jogging_active;
+    // Aggregate "the homing state machine is running", from
+    // get_homing_is_active() in motion. Unlike the per-joint EMC_JOINT_STAT
+    // .homing flags, this stays true across the gap between HOME_SEQUENCE
+    // groups, where every joint momentarily reads .homing == false while the
+    // machine is still homing (see the race note in motion/homing.c).
+    bool homing_active;
     uint64_t heartbeat;  // motion controller's heartbeat counter
+
 };
 
 // declarations for EMC_TASK classes
@@ -1432,6 +1466,26 @@ class EMC_TASK_STAT_MSG:public RCS_STAT_MSG {
     uint64_t taskbeat;  // milltask's main loop heartbeat counter
 };
 
+// How many frames EMC_TASK_STAT::callStack can hold.
+//
+// The interpreter refuses to go deeper than INTERP_SUB_ROUTINE_LEVELS nested
+// subroutine calls (rs274ngc/interp_internal.hh), and task stores one frame per
+// call, so this must not be smaller than that number.  This header cannot see
+// it, so a static_assert in task/emctask.cc - the one file that includes both
+// headers - checks the two against each other.
+#define EMC_MAX_CALL_STACK 10
+
+// One frame of the subroutine call stack: "at line <line> of <filename> we
+// called subroutine <subname>".  Sizes are kept tight because EMC_TASK_STAT is
+// copied through the emcStatus NML buffer on every cycle - see the static_assert
+// on sizeof(EMC_STAT) in emcops.cc.
+struct EmcCallFrame {
+    char filename[LINELEN]; // file containing the call site; same PATH_MAX ->
+                            // LINELEN truncation as EMC_TASK_STAT::file
+    char subname[64];       // O-word subroutine name that was called
+    int  line;              // line number of the call site
+};
+
 class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
   public:
     EMC_TASK_STAT();
@@ -1446,7 +1500,17 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
 
     EMC_TASK_EXEC execState;	// EMC_DONE,WAITING_FOR_MOTION, etc.
     EMC_TASK_INTERP interpState;	// EMC_IDLE,READING,PAUSED,WAITING
-    int callLevel;              // current subroutine level - 0 if not in a subroutine, > 0 otherwise
+    // Subroutine depth of the move motion is executing -- 0 if not in a
+    // subroutine.  Like motionLine, this lags the interpreter, which reads ahead.
+    int callLevel;
+    // The call stack of that same move, callLevel frames deep.  callStack[0] is
+    // the call made from the main program.
+    //
+    // Only the first callLevel entries are valid.  The rest are not sent over
+    // NML (see EMC_TASK_STAT::update() in emc.cc), so their contents are
+    // whatever the reader happened to have there already - read them and you
+    // get frames from some earlier state of the program.
+    EmcCallFrame callStack[EMC_MAX_CALL_STACK];
     int motionLine;		// line motion is executing-- may lag
     int currentLine;		// line currently executing
     int readLine;		// line interpreter has read to
@@ -1460,6 +1524,9 @@ class EMC_TASK_STAT:public EMC_TASK_STAT_MSG {
     int g5x_index;              // index of active g5x system
     EmcPose g92_offset;		// in user units, currently active
     double rotation_xy;
+    EmcPose g68_offset;		// tilted work plane origin, in user units
+    double g68_rotation[9];	// tilted work plane rotation, row major
+    int g68_active;		// a tilted work plane is in effect
     EmcPose toolOffset;		// tool offset, in general pose form
     int activeGCodes[ACTIVE_G_CODES];
     int activeMCodes[ACTIVE_M_CODES];
@@ -1480,18 +1547,6 @@ class EMC_TOOL_CMD_MSG:public RCS_CMD_MSG {
   public:
     EMC_TOOL_CMD_MSG(NMLTYPE t, size_t s)
       : RCS_CMD_MSG(t, s)
-    {};
-
-    // For internal NML/CMS use only.
-    // Sub-class update() calls base-class update()
-    // cppcheck-suppress duplInheritedMember
-    void update(CMS * cms);
-};
-
-class EMC_TOOL_HALT:public EMC_TOOL_CMD_MSG {
-  public:
-    EMC_TOOL_HALT()
-      : EMC_TOOL_CMD_MSG(EMC_TOOL_HALT_TYPE, sizeof(EMC_TOOL_HALT))
     {};
 
     // For internal NML/CMS use only.
@@ -1532,18 +1587,6 @@ class EMC_TOOL_LOAD:public EMC_TOOL_CMD_MSG {
   public:
     EMC_TOOL_LOAD()
       : EMC_TOOL_CMD_MSG(EMC_TOOL_LOAD_TYPE, sizeof(EMC_TOOL_LOAD))
-    {};
-
-    // For internal NML/CMS use only.
-    // Sub-class update() calls base-class update()
-    // cppcheck-suppress duplInheritedMember
-    void update(CMS * cms);
-};
-
-class EMC_TOOL_UNLOAD:public EMC_TOOL_CMD_MSG {
-  public:
-    EMC_TOOL_UNLOAD()
-      : EMC_TOOL_CMD_MSG(EMC_TOOL_UNLOAD_TYPE, sizeof(EMC_TOOL_UNLOAD))
     {};
 
     // For internal NML/CMS use only.
@@ -1629,7 +1672,7 @@ class EMC_TOOL_STAT:public EMC_TOOL_STAT_MSG {
     // Sub-class update() calls base-class update()
     // cppcheck-suppress duplInheritedMember
     void update(CMS * cms);
-    EMC_TOOL_STAT& operator =(const EMC_TOOL_STAT &s);	// need this for [] members
+    EMC_TOOL_STAT& operator =(const EMC_TOOL_STAT &) = delete; // No copy assignment
 
     int pocketPrepped;		// idx ready for loading from
     int toolInSpindle;		// tool loaded, 0 is no tool
@@ -1801,7 +1844,8 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
   public:
     EMC_SPINDLE_OFF()
       : EMC_SPINDLE_CMD_MSG(EMC_SPINDLE_OFF_TYPE, sizeof(EMC_SPINDLE_OFF)),
-        spindle(0)
+        spindle(0),
+        wait_for_spindle_at_speed(0)
     {};
 
     // For internal NML/CMS use only.
@@ -1810,6 +1854,7 @@ class EMC_SPINDLE_OFF:public EMC_SPINDLE_CMD_MSG {
     void update(CMS * cms);
 
     int spindle;    // the spindle to be turned off
+    int wait_for_spindle_at_speed; // wait for at-speed (spindle stopped) before next feed
 };
 
 class EMC_SPINDLE_INCREASE:public EMC_SPINDLE_CMD_MSG {

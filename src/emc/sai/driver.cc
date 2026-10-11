@@ -27,6 +27,7 @@
 #include <stdio.h>    /* gets, etc. */
 #include <stdlib.h>   /* exit       */
 #include <string.h>   /* strcpy     */
+#include <ctype.h>    /* toupper    */
 #include <getopt.h>
 #include <stdarg.h>
 #include <string>
@@ -35,7 +36,6 @@
 #include <histedit.h>
 #include <glob.h>
 #include <wordexp.h>
-#include <rtapi_string.h>
 
 #include "saicanon.hh"
 #include "tooldata/tooldata.hh"
@@ -565,10 +565,34 @@ int main (int argc, char ** argv)
   go_flag = 0;
 
 #ifdef TOOL_NML //{
-  tool_nml_register((CANON_TOOL_TABLE*)& _sai._tools);
+  tool_nml_register(_sai._tools);
 #else //}{
   const int random_toolchanger = 0;
+  // sai gets its OWN mmap. tool_mmap_creator() opens the file O_TRUNC, and it
+  // runs before getopt() below, so every rs274 invocation -- including --help,
+  // and including one given -t -- emptied $HOME/.tool.mmap. That file is the
+  // live tool table, shared MAP_SHARED with io/milltask/halui, so an offline
+  // parse silently replaced the tool table of a running machine.
+  //
+  // mkstemp(), not a name built from the pid: TMPDIR is world-writable and a
+  // pid is guessable, so a predictable name can be pre-created as a symlink
+  // and the victim's rs274 then truncates the attacker's chosen file.
+  // mkstemp() creates it atomically with O_EXCL and mode 0600.
+  char sai_mmap_fname[LINELEN];
+  const char *tmpdir = getenv("TMPDIR");
+  if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
+  snprintf(sai_mmap_fname,sizeof(sai_mmap_fname),
+           "%s/rs274.tool.mmap.XXXXXX",tmpdir);
+  int sai_fd = mkstemp(sai_mmap_fname);
+  if (sai_fd < 0) {
+      perror("rs274: mkstemp for the tool mmap failed");
+      exit(EXIT_FAILURE);
+  }
+  close(sai_fd);   // tool_mmap_creator() opens it by name; O_NOFOLLOW guards
+                   // the gap, and the file already exists and is ours
+  tool_mmap_set_fname(sai_mmap_fname);
   tool_mmap_creator((EMC_TOOL_STAT*)NULL,random_toolchanger);
+  atexit(tool_mmap_close);  // tool_mmap_close() unlinks the file
   /* Notes:
   **   1) sai does not use toolInSpindle,pocketPrepped
   **   2) sai does not distinguish changer type
@@ -676,7 +700,7 @@ usage:
         }
     }
   _sai._external_length_units =  0.03937007874016;
-  if (inifile!= 0) {
+  if (inifile!= NULL) {
       IniFile ini(inifile);
       if (!ini) {
         fprintf(stderr, "could not open supplied INI file %s\n", inifile);
@@ -686,6 +710,13 @@ usage:
       if (auto inistring = ini.findString("LINEAR_UNITS", "TRAJ")) {
           if (*inistring == "mm") {
              _sai._external_length_units = 1.0;
+          }
+      }
+      if (auto coordinates = ini.findString("COORDINATES", "TRAJ")) {
+          _sai._axis_mask = 0;
+          for (char ch : *coordinates) {
+              const char *at = strchr("XYZABCUVW", toupper((unsigned char)ch));
+              if (ch && at) { _sai._axis_mask |= 1 << (at - "XYZABCUVW"); }
           }
       }
       setenv("INI_FILE_NAME",inifile,1);

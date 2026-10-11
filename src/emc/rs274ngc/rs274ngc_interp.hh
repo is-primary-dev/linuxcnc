@@ -16,6 +16,7 @@
 
 #ifndef RS274NGC_INTERP_H
 #define RS274NGC_INTERP_H
+#include <stdio.h>		// FILE
 #include "rs274ngc.hh"
 #include "interp_internal.hh"
 #include "nml_intf/interp_return.hh"
@@ -45,6 +46,7 @@ public:
 // get ready to run
  int init() override;
  void set_loop_on_main_m99(bool state) override;
+ void set_in_startup_code(bool state) override;
 
 // load a tool table
  int load_tool_table();
@@ -125,6 +127,9 @@ public:
 
  int line() override { return sequence_number(); }
  int call_level() override;
+ int resolve_call_stack_depth(int node_id) override;
+ int resolve_call_stack_frame(int node_id, int level, const char **filename,
+                              const char **subname, int *line) override;
 
  char *command(char *buf, size_t len) override { line_text(buf, len); return buf; }
 
@@ -222,6 +227,9 @@ public:
  int check_items(block_pointer block, setup_pointer settings);
  int check_m_codes(block_pointer block);
  int check_other_codes(block_pointer block);
+ int check_spindle_sync_feed(setup_pointer settings, double pitch,
+                             const char *code, const double delta[9],
+                             double min_radius);
  int close_and_downcase(char *line);
  void nurbs_reset_global_variables(void);
  int convert_nurbs(int move, block_pointer block, setup_pointer settings);
@@ -259,7 +267,9 @@ public:
                                 setup_pointer settings);
  int convert_param_comment(char *comment, char *expanded, int len);
     int convert_comment(char *comment, bool enqueue = true);
- int convert_control_mode(int g_code, double tolerance, double naivecam_tolerance, setup_pointer settings);
+ int convert_control_mode(int g_code, double tolerance, double naivecam_tolerance,
+                          double r_word, bool r_present, /* G64_R_PLANNER */
+                          setup_pointer settings);
  int convert_adaptive_mode(int g_code, setup_pointer settings);
 
  int convert_coordinate_system(int g_code, setup_pointer settings);
@@ -321,6 +331,8 @@ public:
                         setup_pointer settings);
  int convert_savehome(int move, block_pointer block,
                         setup_pointer settings);
+ int convert_home_cycle(block_pointer block,              // G28.2
+                        setup_pointer settings);
  int convert_length_units(int g_code, setup_pointer settings);
     int convert_m(block_pointer block, setup_pointer settings);
  int convert_modal_0(int code, block_pointer block,
@@ -354,13 +366,30 @@ public:
  int convert_tool_length_offset(int g_code, block_pointer block,
                                       setup_pointer settings);
  int convert_tool_select(block_pointer block, setup_pointer settings);
+ int convert_kins_switch(int code, block_pointer block, setup_pointer settings);
+ int convert_work_plane(int g_code, block_pointer block, setup_pointer settings);
+ int work_plane_build(block_pointer block, setup_pointer settings,
+                      double origin[3], double rotation[3][3], int *complete);
+ int work_plane_set(setup_pointer settings, int code,
+                    const double origin[3], const double rotation[3][3]);
+ int work_plane_cancel(setup_pointer settings, bool tell_canon_anyway = false);
+ int work_plane_check_sequence(block_pointer block, setup_pointer settings);
+ int work_plane_local(block_pointer block, setup_pointer settings);
+ int work_plane_restore(setup_pointer settings);
+ void g68_apply(setup_pointer settings, double *x, double *y, double *z);
+ void g68_remove(setup_pointer settings, double *x, double *y, double *z);
+ void g68_unrotate(setup_pointer settings, double *x, double *y, double *z);
+ void program_to_world_xyz(setup_pointer settings, double px, double py, double pz,
+                           double *wx, double *wy, double *wz);
+ void world_to_program_xyz(setup_pointer settings, double wx, double wy, double wz,
+                           double *px, double *py, double *pz);
  int update_tag(StateTag &tag);
  int cycle_feed(block_pointer block, CANON_PLANE plane, double end1,
                 double end2, double end3);
  int cycle_traverse(block_pointer block, CANON_PLANE plane, double end1, double end2,
                           double end3);
  int enhance_block(block_pointer block, setup_pointer settings);
- int _execute(const char *command = 0);
+ int _execute(const char *command = NULL);
  int execute_binary(double *left, int operation, double *right);
  int execute_binary1(double *left, int operation, double *right);
  int execute_binary2(double *left, int operation, double *right);
@@ -474,7 +503,8 @@ int read_dollar(char *line, int *counter, block_pointer block,
  int gen_settings(
      int *int_current, int *int_saved,
      double *float_current, double *float_saved,
-     std::string &cmd);
+     std::string &cmd,
+     bool include_spindle_speed);
  int gen_m_codes(int *current, int *saved, std::string &cmd);
     int gen_restore_cmd(int *current_g,
 			int *current_m,
@@ -522,6 +552,7 @@ int read_dollar(char *line, int *counter, block_pointer block,
  int read_z(char *line, int *counter, block_pointer block,
                   double *parameters);
  int refresh_actual_position(setup_pointer settings);
+ void get_abs_position(setup_pointer settings, double abs_pos[9]);
  void rotate(double *x, double *y, double t);
  int set_probe_data(setup_pointer settings);
  int write_g_codes(block_pointer block, setup_pointer settings);
@@ -568,6 +599,12 @@ int read_dollar(char *line, int *counter, block_pointer block,
  int enter_context(setup_pointer settings, block_pointer block);
  // leave current subroutine context
  int leave_context(setup_pointer settings, bool restore = true);
+
+ // call-stack node bookkeeping, backing resolve_call_stack_*()
+ int push_call_stack_node(setup_pointer settings, const char *filename,
+                          const char *subName, int sequence_number);
+ call_stack_node *find_call_stack_node(int node_id);
+ int walk_call_stack(int node_id, call_stack_node **frames, int max_frames);
 
     //int call_fsm(setup_pointer settings, int event);
     //int execute_pycall(setup_pointer settings, const char *name, int call_phase);

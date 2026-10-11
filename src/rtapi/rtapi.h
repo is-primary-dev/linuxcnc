@@ -363,9 +363,6 @@ RTAPI_BEGIN_DECLS
  */
     extern int rtapi_prio_next_lower(int prio);
 
-
-#define RTAPI_NO_FP   0 /*!< No floating point. */
-#define RTAPI_USES_FP 1 /*!< Uses floating point. */
  /**
   * @brief Creates but does not start a realtime task.
   *
@@ -378,9 +375,6 @@ RTAPI_BEGIN_DECLS
   * arbitrary void pointer when the task is started, and can be used to pass any
   * amount of data to the task (by pointing to a struct, or other such tricks).
   *
-  * @c uses_fp is deprecated and ignored.  All tasks now unconditionally
-  * save and restore FPU/SSE state on context switch.  This parameter
-  * will be removed in a future version.
   * @param taskcode Pointer to the function to be called when the task is
   *                 started.
   * @param arg Argument to be passed to the taskcode function.
@@ -388,14 +382,13 @@ RTAPI_BEGIN_DECLS
   * @param owner ID of the module that is making the call see rtapi_init().
   * @param stacksize The amount of stack to be used for the task, be generous,
   *                  hardware interrupts may use the same stack.
-  * @param uses_fp Deprecated and ignored.  Kept for API compatibility.
   * @return On success, returns a positive integer task ID, @c task_id. This ID
   *         is used for all subsequent calls that need to act on the task. On
   *         failure, returns a negative error code as listed above.
  * @note Call only from within init/cleanup code, not from realtime tasks.
  */
     extern int rtapi_task_new(void (*taskcode) (void *), void *arg,
-	int prio, int owner, unsigned long int stacksize, int uses_fp);
+	int prio, int owner, unsigned long int stacksize);
 
 /**
  * @brief Deletes a task.
@@ -985,7 +978,28 @@ int rtapi_spawnp_as_root(pid_t *pid, const char *path,
 #endif
 
 extern int rtapi_is_kernelspace(void);
+
+//If changing anything here:
+//Update also halmodule.cc PyInit__hal()
+//You can use type > REALTIME_TYPE_NONE to check if you have realtime at all
+typedef enum{
+    REALTIME_TYPE_UNINITIALIZED = -1, //Realtime not running, type unknown
+    REALTIME_TYPE_NONE = 0,           //No realtime available
+    REALTIME_TYPE_UNKNOWN = 1,        //Only used when LINUXCNC_FORCE_REALTIME=1 is set. Unknown, no PREEMPT_DYNAMIC but SCHED_FIFO is available. Not recommended.
+    REALTIME_TYPE_PREEMPT_DYNAMIC = 2,//Only used when LINUXCNC_FORCE_REALTIME=1 is set. Not recommended.
+    REALTIME_TYPE_PREEMPT_RT = 3,
+    REALTIME_TYPE_RTAI = 4,
+    REALTIME_TYPE_LXRT = 5,
+    REALTIME_TYPE_XENOMAI = 6,
+    REALTIME_TYPE_XENOMAI_EVL = 7,
+} rtapi_realtime_type_t;
+
+#ifdef RTAPI
+//Only available in real time context
+//Always use hal_get_realtime_type() in components
 extern int rtapi_is_realtime(void);
+extern rtapi_realtime_type_t rtapi_get_realtime_type(void);
+#endif
 
 int rtapi_open_as_root(const char *filename, int mode);
 

@@ -12,13 +12,13 @@
 ********************************************************************/
 
 #include <stdlib.h>
-#include <fmt/format.h>
+#include "logutil.hh"
 
 #include "nml_intf/emc.hh"
 #include <emcpos.h>
-#include "libnml/rcs/rcs_print.hh"
+#include <cstdio>
 #include "nml_intf/emcglb.h"
-#include "inifile.hh"
+#include <inifile.hh>
 
 #include "inihal.hh"
 #include "initraj.hh"
@@ -30,7 +30,7 @@ extern value_inihal_data old_inihal_data;
 static void inline print_dbg_config(const std::string &s)
 {
     if (emc_debug & EMC_DEBUG_CONFIG) {
-        rcs_print_error("%s", (fmt::format("{}: failed\n", s)).c_str());
+        log_error("{}: failed\n", s);
     }
 }
 
@@ -105,7 +105,7 @@ static int loadTraj(const IniFile &ini)
     double linearUnits  = ini.findLinearUnits("LINEAR_UNITS", "TRAJ", 0.0);
     double angularUnits = ini.findAngularUnits("ANGULAR_UNITS", "TRAJ", 0.0);
     if (0 != emcTrajSetUnits(linearUnits, angularUnits)) {
-        rcs_print("emcTrajSetUnits failed to set [TRAJ]LINEAR_UNITS or [TRAJ]ANGULAR_UNITS\n");
+        log_info("emcTrajSetUnits failed to set [TRAJ]LINEAR_UNITS or [TRAJ]ANGULAR_UNITS\n");
         return -1;
     }
 
@@ -157,7 +157,9 @@ static int loadTraj(const IniFile &ini)
     int planner_type = ini.findIntV("PLANNER_TYPE", "TRAJ", 0, 0, 1);
     // Also force planner type 0 if max_jerk < 1 (S-curve needs valid jerk)
     if (planner_type == 1 && jerk < 1.0) {
-        // FIXME: Should write a warning message to the user
+        log_error("[TRAJ]PLANNER_TYPE = 1 (S-curve) requires "
+               "[TRAJ]MAX_LINEAR_JERK >= 1.0 (got {}); "
+               "using trapezoidal planner\n", jerk);
         planner_type = 0;
     }
     if (0 != emcTrajPlannerType(planner_type)) {
@@ -165,6 +167,33 @@ static int loadTraj(const IniFile &ini)
         return -1;
     }
     old_inihal_data.traj_planner_type = planner_type;
+
+    // G64_R_PLANNER: which planner a G64 R>0 "smooth" request resolves to.
+    // Part programs carry intent only (R0 = trapezoidal, R>0 = jerk-limited);
+    // the machine names the implementation here, so programs stay valid when
+    // the machine's smooth planner changes. 0 disables G64 R>0 (task refuses
+    // with an operator error). Defaults to PLANNER_TYPE when that is a smooth
+    // planner, else 1. Currently the only smooth planner is type 1.
+    int smooth_planner = ini.findIntV("SMOOTH_PLANNER", "TRAJ",
+                                      planner_type > 0 ? planner_type : 1, 0, 1);
+    if (jerk < 1.0) {
+        // parity with the forced-trapezoidal fallback above: without a valid
+        // jerk limit there is no usable smooth planner to resolve to
+        smooth_planner = 0;
+    }
+    if (0 != emcTrajSetSmoothPlanner(smooth_planner)) {
+        print_dbg_config("emcTrajSetSmoothPlanner");
+        return -1;
+    }
+
+    // S-curve rest-to-rest peak velocity scale (0.1..1.0 of the jerk-feasible
+    // corner speed). Runtime-tunable via ini.traj_scurve_peak_scale.
+    double scurve_peak_scale = ini.findRealV("SCURVE_PEAK_SCALE", "TRAJ", 1.0);
+    if (0 != emcTrajSetScurvePeakScale(scurve_peak_scale)) {
+        print_dbg_config("emcTrajSetScurvePeakScale");
+        return -1;
+    }
+    old_inihal_data.traj_scurve_peak_scale = scurve_peak_scale;
 
     int arcBlendEnable = ini.findBoolV("ARC_BLEND_ENABLE", "TRAJ", true);
     int arcBlendFallbackEnable = ini.findBoolV("ARC_BLEND_FALLBACK_ENABLE", "TRAJ", false);
@@ -209,7 +238,7 @@ static int loadTraj(const IniFile &ini)
             errno = 0;
             double val = strtod(toks[i].c_str(), &eptr);
             if (errno || *eptr || eptr == toks[i].c_str()) {
-                rcs_print_error("Invalid value '%s' for axis %zu in homePose\n", toks[i].c_str(), i);
+                log_error("Invalid value '{}' for axis {} in homePose\n", toks[i], i);
                 return -1;
             }
             switch(i) {
@@ -224,7 +253,7 @@ static int loadTraj(const IniFile &ini)
             case 8: homePose.w = val; break;
             default:
                 // Should never trigger because of EMCMOT_MAX_AXIS, but you never know
-                rcs_print_error("Value for invalid axis number %zu cannot be part of homePose\n", i);
+                log_error("Value for invalid axis number {} cannot be part of homePose\n", i);
                 return -1;
             }
         }

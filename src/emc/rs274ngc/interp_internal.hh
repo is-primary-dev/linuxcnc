@@ -20,17 +20,18 @@
 #include <stdio.h>
 #include <set>
 #include <map>
+#include <vector>
 #include <bitset>
 #include "nml_intf/canon.hh"
 #include <emcpos.h>
 #include "libintl.h"
 #include <boost/python/object_fwd.hpp>
 #include <cmath>
-#include <rtapi_string.h>	// rtapi_strlcpy()
 #include "interp_parameter_def.hh"
 #include "interp_fwd.hh"
 #include "interp_base.hh"
 #include "tooldata/tooldata.hh"
+#include <axis_kinds.hh>
 
 
 #define _(s) gettext(s)
@@ -45,6 +46,15 @@ template<class T>
 T D2R(T r) { return r * (M_PI / 180.); }
 template<class T>
 T SQ(T a) { return a*a; }
+
+inline double wrap_rotary_to_360(double v) {
+    double m = fmod(v, 360.0);
+    if (m < 0.0) m += 360.0;
+    return m;
+}
+
+// travel below this makes a ROTARY_MODULO axis bounded, warned about at startup
+#define ROTARY_MODULO_MIN_RANGE 1.0e6
 
 template<class T>
 inline int round_to_int(T x) {
@@ -92,6 +102,15 @@ Tighter tolerance down to a minimum of 1 micron +- also accepted.
 static inline bool equal(double a, double b)
 {
     return (fabs(a - b) < TOLERANCE_EQUAL);
+}
+
+/* Smallest distance from zero over the closed interval [a, b], which is zero
+   if the interval spans it. */
+static inline double min_abs_over_range(double a, double b)
+{
+    if ((a <= 0.0 && b >= 0.0) || (b <= 0.0 && a >= 0.0))
+	return 0.0;
+    return fmin(fabs(a), fabs(b));
 }
 
 #define TINY 1e-12              /* for arc_data_r */
@@ -211,6 +230,8 @@ enum GCodes
     G_7 = 70,
     G_8 = 80,
     G_10 = 100,
+    G_12_1 = 121,
+    G_13_1 = 131,
     G_17 = 170,
     G_17_1 = 171,
     G_18 = 180,
@@ -221,6 +242,7 @@ enum GCodes
     G_21 = 210,
     G_28 = 280,
     G_28_1 = 281,
+    G_28_2 = 282,   /* G-code homing cycle (home one/all joints) */
     G_30 = 300,
     G_30_1 = 301,
     G_33 = 330,
@@ -237,6 +259,7 @@ enum GCodes
     G_43 = 430,
     G_43_1 = 431,
     G_43_2 = 432,
+    G_43_4 = 434,
     G_49 = 490,
     G_50 = 500,
     G_51 = 510,
@@ -251,6 +274,9 @@ enum GCodes
     G_59_1 = 591,
     G_59_2 = 592,
     G_59_3 = 593,
+    G_68_2 = 682,
+    G_68_4 = 684,
+    G_69 = 690,
     G_61 = 610,
     G_61_1 = 611,
     G_64 = 640,
@@ -340,6 +366,7 @@ enum phases  {
     STEP_SET_FEED_RATE,
     STEP_SET_SPINDLE_SPEED,
     STEP_PREPARE,
+    STEP_M_3,
     STEP_M_5,
     STEP_M_6,
     STEP_RETAIN_G43,
@@ -354,6 +381,7 @@ enum phases  {
     STEP_CUTTER_COMP,
     STEP_TOOL_LENGTH_OFFSET,
     STEP_COORD_SYSTEM,
+    STEP_WORK_PLANE,
     STEP_CONTROL_MODE,
     STEP_DISTANCE_MODE,
     STEP_IJK_DISTANCE_MODE,
@@ -368,7 +396,7 @@ enum phases  {
 
 // Modal groups
 // also indices into g_modes
-// unused: 9,11
+// unused: 11
 enum ModalGroups
 {
     GM_MODAL_0 = 0,
@@ -380,7 +408,7 @@ enum ModalGroups
     GM_LENGTH_UNITS = 6,
     GM_CUTTER_COMP = 7,
     GM_TOOL_LENGTH_OFFSET = 8,
-    // 9 unused
+    GM_WORK_PLANE = 9,
     GM_RETRACT_MODE = 10,
     // 11 unused
     GM_COORD_SYSTEM = 12,
@@ -623,6 +651,26 @@ struct context_struct {
 #define CONTEXT_RESTORE_ON_RETURN 2 // automatically execute M71 on sub return
 #define REMAP_FRAME   4 // a remap call frame
 
+// Number of call-stack nodes kept for after-the-fact stack resolution.
+// The interpreter reads ahead of motion, so a node
+// must stay resolvable from the moment it is stamped into a StateTag until the
+// corresponding move has finished executing.  16384 nodes covers far more
+// subroutine calls than can be in flight through interp_list plus the motion
+// queue, and costs ~512kB of ordinary (non-realtime) memory.
+#define INTERP_CALL_STACK_NODES 16384
+
+// One entry of the interpreter call stack, recorded as a link to its caller so
+// that a complete stack can be recovered later from a single integer id.
+// Both strings are interned by strstore() and therefore valid for the lifetime
+// of the process, so nodes store pointers rather than copies.
+struct call_stack_node {
+    int id;                   // monotonic id of this node; 0 is the reserved root
+    int parent;               // id of the calling node; 0 at the outermost level
+    const char *filename;     // file containing the call site
+    const char *subName;      // name of the subroutine that was entered
+    int sequence_number;      // line number of the call site
+};
+
 struct offset_struct {
   int type;
   const char *filename;  // the name of the file
@@ -736,6 +784,18 @@ struct setup
   double origin_offset_y;       // g5x offset y
   double origin_offset_z;       // g5x offset z
   double rotation_xy;         // rotation of coordinate system around Z, in degrees
+  // the tilted work plane (G68.2): a frame inside G92, program units,
+  // in the active coordinate system
+  bool g68_active;
+  int g68_code;                 // the code that defined it, for the modal display
+  double g68_offset[3];
+  double g68_rotation[3][3];    // row major, columns are the plane's axes
+  double g68_local[3];          // a G52 given in the plane, along the plane's axes
+  int g68_seq_code;             // a three-point or two-vector definition in progress
+  int g68_seq_p;
+  unsigned g68_seq_have;        // bit per Q received
+  int g68_seq_r_q;              // the P2 block that gave R, or -1
+  double g68_seq_word[4][7];    // per Q: x y z i j k r
   double parameters[interp_param_global::RS274NGC_MAX_PARAMETERS];   // system parameters
   int parameter_occurrence;     // parameter buffer index
   int parameter_numbers[MAX_NAMED_PARAMETERS];    // parameter number buffer
@@ -747,7 +807,11 @@ struct setup
   CANON_PLANE plane;            // active plane, XY-, YZ-, or XZ-plane
   bool probe_flag;            // flag indicating probing done
   bool input_flag;            // flag indicating waiting for input done
+  bool kinsSwitch_flag;       // flag indicating waiting for kinematics switch done
+  int kins_type;              // kinematics selected by G12.1/G13.1
+  bool kins_by_g43_4;         // G43.4 selected the kinematics, for G49 to undo
   bool toolchange_flag;       // flag indicating we just had a tool change
+  bool home_flag;             // flag indicating a G28.2 homing cycle just ran
   int input_index;		// channel queried
   bool input_digital;		// input queried was digital (false=analog)
   bool cutter_comp_firstmove; // this is the first comp move
@@ -763,6 +827,7 @@ struct setup
   int active_spindle;			// the spindle currently used for CSS, FPR etc.
   double speed[EMCMOT_MAX_SPINDLES];// array of spindle speeds
   SPINDLE_MODE spindle_mode[EMCMOT_MAX_SPINDLES];// SPINDLE_MODE::CONSTANT_RPM or SPINDLE_MODE::CONSTANT_SURFACE
+  double css_maximum[EMCMOT_MAX_SPINDLES];// G96 D word, RPM ceiling in CSS mode, 0 if not given
   CANON_SPEED_FEED_MODE speed_feed_mode;        // independent or synched
   bool speed_override[EMCMOT_MAX_SPINDLES];        // whether speed override is enabled
   CANON_DIRECTION spindle_turning[EMCMOT_MAX_SPINDLES];  // direction spindle is turning
@@ -788,6 +853,9 @@ struct setup
   int value_returned;                // the last NGC procedure did/did not return a value
   int call_level;                    // current subroutine level
   context sub_context[INTERP_SUB_ROUTINE_LEVELS];
+  int call_stack_id;                 // id of the current call-stack node, 0 == main
+  int call_stack_next_id;            // next node id to hand out
+  std::vector<call_stack_node> call_stack_nodes;  // ring of INTERP_CALL_STACK_NODES
   int call_state;                  //  enum call_states - indicate Py handler reexecution
   offset_map_type offset_map;      // store label x name, file, line
 
@@ -807,13 +875,11 @@ struct setup
   int tool_change_with_spindle_on;
   double parameter_g73_peck_clearance;
   double parameter_g83_peck_clearance;
-  int a_axis_wrapped;
-  int b_axis_wrapped;
-  int c_axis_wrapped;
-
-  int a_indexer_jnum;
-  int b_indexer_jnum;
-  int c_indexer_jnum;
+  AxisKinds axis_kinds;              // [AXIS_<letter>] TYPE, [TRAJ] FEED_AXES
+  int axis_wrapped[9];               // by AxisIndex; angular axes only
+  int axis_rotary_modulo[9];         // angular axes only
+  int rotary_modulo_literal;         // M26 = shortest path (default), M27 = literal absolute
+  int axis_indexer_jnum[9];          // -1 where the axis has no locking indexer
 
   bool lathe_diameter_mode;       //Lathe diameter mode (g07/G08)
   bool mdi_interrupt;
@@ -824,8 +890,9 @@ struct setup
     // control to skip to beginning of file
     bool loop_on_main_m99;
 
-  int disable_g92_persistence;
+  bool disable_g92_persistence;
   bool disable_auto_g54;
+  bool retain_work_plane;       // the plane survives M2, M30 and an abort
 
 // add new geometric fields for our new tags
   double heading;
@@ -847,6 +914,8 @@ struct setup
 
     boost::python::object *pythis;  // boost::cref to 'this'
     const char *on_abort_command;
+    bool in_abort_command;      // running the ON_ABORT_COMMAND routine
+    bool in_startup_code;       // running the startup code at task init
     int_remap_map  g_remapped,m_remapped;
     remap_map remaps;
 #define INIT_FUNC  "__init__"
@@ -883,13 +952,26 @@ macros totally crash-proof. If the function call stack is deeper than
 
 */
 
+#include <assert.h>
+#include <type_traits>
+
+static inline void rs274ngc_strlcpy(char *dst, const char *src, size_t dstsize) {
+    strncpy(dst, src, dstsize);
+    dst[dstsize-1] = 0;
+}
+
+#define rs274ngc_strxcpy(dst, src) do { \
+        static_assert(std::is_array<decltype(dst)>::value, "dst must be non-const array"); \
+        strncpy(dst, src, sizeof(dst)); \
+        dst[sizeof(dst)-1] = 0; \
+    } while(0)
 
 // Just set an error string using printf-style formats, do NOT return
 #define ERM(fmt, ...)                                      \
     do {                                                   \
         setError (fmt, ## __VA_ARGS__);                    \
         _setup.stack_index = 0;                            \
-        (rtapi_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
+        (rs274ngc_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
         _setup.stack[_setup.stack_index][STACK_ENTRY_LEN-1] = 0; \
         _setup.stack_index++; \
         _setup.stack[_setup.stack_index][0] = 0;           \
@@ -900,7 +982,7 @@ macros totally crash-proof. If the function call stack is deeper than
     do {                                                   \
         setError (fmt, ## __VA_ARGS__);                    \
         _setup.stack_index = 0;                            \
-        (rtapi_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
+        (rs274ngc_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
         _setup.stack[_setup.stack_index][STACK_ENTRY_LEN-1] = 0; \
         _setup.stack_index++; \
         _setup.stack[_setup.stack_index][0] = 0;           \
@@ -911,7 +993,7 @@ macros totally crash-proof. If the function call stack is deeper than
 #define ERN(error_code)                                    \
     do {                                                   \
         _setup.stack_index = 0;                            \
-        (rtapi_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
+        (rs274ngc_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
         _setup.stack[_setup.stack_index][STACK_ENTRY_LEN-1] = 0; \
         _setup.stack_index++; \
         _setup.stack[_setup.stack_index][0] = 0;           \
@@ -923,7 +1005,7 @@ macros totally crash-proof. If the function call stack is deeper than
 #define ERP(error_code)                                        \
     do {                                                       \
         if (_setup.stack_index < STACK_LEN - 1) {                         \
-            (rtapi_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
+            (rs274ngc_strlcpy(_setup.stack[_setup.stack_index], __PRETTY_FUNCTION__, STACK_ENTRY_LEN)); \
             _setup.stack[_setup.stack_index][STACK_ENTRY_LEN-1] = 0;    \
             _setup.stack_index++;                                       \
             _setup.stack[_setup.stack_index][0] = 0;           \

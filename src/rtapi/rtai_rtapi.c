@@ -622,7 +622,7 @@ static int rtapi_trap_handler(int vec, int signo, struct pt_regs *regs,
 }
 
 int rtapi_task_new(void (*taskcode) (void *), void *arg,
-    int prio, int owner, unsigned long int stacksize, int uses_fp)
+    int prio, int owner, unsigned long int stacksize)
 {
     int n;
     long task_id;
@@ -667,8 +667,7 @@ int rtapi_task_new(void (*taskcode) (void *), void *arg,
     }
     task->taskcode = taskcode;
     task->arg = arg;
-    /* call OS to initialize the task - use predetermined CPU.
-       uses_fp is deprecated and ignored; always save FPU state. */
+    /* call OS to initialize the task - use predetermined CPU. */
     retval = rt_task_init_cpuid(ostask_array[task_id], wrapper, task_id,
 	 stacksize, prio, 1 /* always save FPU */, 0 /* signal */, rtapi_data->rt_cpu );
     if (retval != 0) {
@@ -1688,8 +1687,9 @@ unsigned char rtapi_inb(unsigned int port)
     return inb(port);
 }
 
-int rtapi_is_realtime() { return 1; }
-int rtapi_is_kernelspace() { return 1; }
+int rtapi_is_realtime(void) { return 1; }
+rtapi_realtime_type_t rtapi_get_realtime_type(void){ return REALTIME_TYPE_RTAI; }
+int rtapi_is_kernelspace(void) { return 1; }
 
 /* starting with kernel 2.6, symbols that are used by other modules
    _must_ be explicitly exported.  2.4 and earlier kernels exported
@@ -1746,4 +1746,5 @@ EXPORT_SYMBOL(rtapi_disable_interrupt);
 EXPORT_SYMBOL(rtapi_outb);
 EXPORT_SYMBOL(rtapi_inb);
 EXPORT_SYMBOL(rtapi_is_realtime);
+EXPORT_SYMBOL(rtapi_get_realtime_type);
 EXPORT_SYMBOL(rtapi_is_kernelspace);

@@ -17,20 +17,21 @@
 
 #include <rtapi_math.h>
 #include <rtapi_app.h>
+#include <rtapi_string.h>
 #include <hal.h>
 #include <kinematics.h>
 
 #include "rotarydeltakins-common.h"
 
-struct haldata
+static struct haldata
 {
-    hal_float_t *pfr;
-    hal_float_t *tl;
-    hal_float_t *sl;
-    hal_float_t *fr;
+    hal_real_t pfr;
+    hal_real_t tl;
+    hal_real_t sl;
+    hal_real_t fr;
 } *haldata;
 
-int comp_id;
+static int comp_id;
 
 int kinematicsForward(const double * joints,
                       EmcPose * pos,
@@ -38,7 +39,7 @@ int kinematicsForward(const double * joints,
                       KINEMATICS_INVERSE_FLAGS * iflags) {
     (void)fflags;
     (void)iflags;
-    set_geometry(*haldata->pfr, *haldata->tl, *haldata->sl, *haldata->fr);
+    set_geometry(hal_get_real(haldata->pfr), hal_get_real(haldata->tl), hal_get_real(haldata->sl), hal_get_real(haldata->fr));
     return kinematics_forward(joints, pos);
 }
 
@@ -47,8 +48,58 @@ int kinematicsInverse(const EmcPose *pos, double *joints,
         KINEMATICS_FORWARD_FLAGS *fflags) {
     (void)iflags;
     (void)fflags;
-    set_geometry(*haldata->pfr, *haldata->tl, *haldata->sl, *haldata->fr);
+    set_geometry(hal_get_real(haldata->pfr), hal_get_real(haldata->tl), hal_get_real(haldata->sl), hal_get_real(haldata->fr));
     return kinematics_inverse(pos, joints);
+}
+
+int kinematicsJacobian(const double *joints,
+                       const EmcPose *pos,
+                       double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                       const KINEMATICS_INVERSE_FLAGS *iflags) {
+    int i, j;
+    (void)iflags;
+    set_geometry(hal_get_real(haldata->pfr), hal_get_real(haldata->tl), hal_get_real(haldata->sl), hal_get_real(haldata->fr));
+    memset(jac, 0, EMCMOT_MAX_JOINTS * EMCMOT_MAX_AXIS * sizeof(jac[0][0]));
+    // The foot stays a shin length from each knee, so along a leg the
+    // motion of the foot and the motion of the knee agree:
+    //     (P - K) . dP = (P - K) . dK/dq dq
+    // K is the knee less the foot offset, written as kinematics_forward()
+    // writes it, and q the hip angle that swings it.
+    for (i = 0; i < 3; i++) {
+        double q = D2R(joints[i]);
+        double reach = platformradius - footradius + thighlength * cos(q);
+        double kx, ky, kz, dkx, dky, dkz, px, py, pz, denom;
+        switch (i) {
+        case 0:
+            kx = 0;               ky = -reach;
+            dkx = 0;              dky = thighlength * sin(q);
+            break;
+        case 1:
+            kx = reach * 0.5 * sqrt(3);  ky = reach * 0.5;
+            dkx = -thighlength * sin(q) * 0.5 * sqrt(3);
+            dky = -thighlength * sin(q) * 0.5;
+            break;
+        default:
+            kx = -reach * 0.5 * sqrt(3); ky = reach * 0.5;
+            dkx = thighlength * sin(q) * 0.5 * sqrt(3);
+            dky = -thighlength * sin(q) * 0.5;
+            break;
+        }
+        kz = -thighlength * sin(q);
+        dkz = -thighlength * cos(q);
+        px = pos->tran.x - kx;
+        py = pos->tran.y - ky;
+        pz = pos->tran.z - kz;
+        denom = (px*dkx + py*dky + pz*dkz) * (M_PI/180.);
+        // the shin at right angles to the thigh's swing: the knee cannot
+        // move the foot, so no finite hip rate follows the foot
+        if (fabs(denom) < 1e-12) { return -1; }
+        jac[i][0] = px/denom;
+        jac[i][1] = py/denom;
+        jac[i][2] = pz/denom;
+    }
+    for (j = 3; j < 9; j++) { jac[j][j] = 1; }
+    return 0;
 }
 
 KINEMATICS_TYPE kinematicsType()
@@ -58,43 +109,28 @@ KINEMATICS_TYPE kinematicsType()
 
 int rtapi_app_main(void)
 {
-    int retval = 0;
+    int retval;
 
     comp_id = hal_init("rotarydeltakins");
-    if(comp_id < 0) retval = comp_id;
+    if(comp_id < 0) return comp_id;
 
-    if(retval == 0)
-    {
-        haldata = hal_malloc(sizeof(struct haldata));
-        retval = !haldata;
-    }
+    haldata = hal_malloc(sizeof(*haldata));
+    if(!haldata) { retval = -ENOMEM; goto error; }
 
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->pfr, comp_id,
-                "rotarydeltakins.platformradius");
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->tl, comp_id,
-                "rotarydeltakins.thighlength");
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->sl, comp_id,
-                "rotarydeltakins.shinlength");
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->fr, comp_id,
-                "rotarydeltakins.footradius");
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->pfr, RDELTA_PFR, "rotarydeltakins.platformradius")) < 0)
+        goto error;
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->tl, RDELTA_TL, "rotarydeltakins.thighlength")) < 0)
+        goto error;
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->sl, RDELTA_SL, "rotarydeltakins.shinlength")) < 0)
+        goto error;
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->fr, RDELTA_FR, "rotarydeltakins.footradius")) < 0)
+        goto error;
 
-    if(retval == 0)
-    {
-        *haldata->pfr = RDELTA_PFR;
-        *haldata->tl = RDELTA_TL;
-        *haldata->sl = RDELTA_SL;
-        *haldata->fr = RDELTA_FR;
-    }
+    hal_ready(comp_id);
+    return 0;
 
-    if(retval == 0)
-    {
-        hal_ready(comp_id);
-    }
-
+error:
+    hal_exit(comp_id);
     return retval;
 }
 
@@ -107,4 +143,5 @@ KINS_NOT_SWITCHABLE
 EXPORT_SYMBOL(kinematicsType);
 EXPORT_SYMBOL(kinematicsForward);
 EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsJacobian);
 MODULE_LICENSE("GPL");

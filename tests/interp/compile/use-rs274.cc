@@ -86,7 +86,7 @@ void SET_NAIVECAM_TOLERANCE(double tolerance) {}
 void SET_CUTTER_RADIUS_COMPENSATION(double radius) {}
 void START_CUTTER_RADIUS_COMPENSATION(int direction) {}
 void STOP_CUTTER_RADIUS_COMPENSATION() {}
-void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode) {}
+void START_SPEED_FEED_SYNCH(int spindle, double feed_per_revolution, bool velocity_mode, double angle_degrees) {}
 void STOP_SPEED_FEED_SYNCH() {}
 
 void ARC_FEED(int lineno,
@@ -136,7 +136,7 @@ void SPINDLE_RETRACT_TRAVERSE() {}
 void START_SPINDLE_CLOCKWISE(int spindle, int dir) {}
 void START_SPINDLE_COUNTERCLOCKWISE(int spindle, int dir) {}
 void SET_SPINDLE_SPEED(int spindle, double r) {}
-void STOP_SPINDLE_TURNING(int spindle) {}
+void STOP_SPINDLE_TURNING(int spindle, int wait_for_atspeed) {}
 void SPINDLE_RETRACT() {}
 void ORIENT_SPINDLE(int spindle, double orientation, int mode) {}
 void WAIT_SPINDLE_ORIENT_COMPLETE(int spindle, double timeout) {}

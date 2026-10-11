@@ -175,52 +175,45 @@ the adjustment values should be added to the old values instead of replacing the
 
 """;
 see_also "kins(9)";
-pin out bit dummy=1; // halcompile requires at least one pin
+pin out bool dummy=1; // halcompile requires at least one pin
+option extra_setup;
 license "GPL";
 ;;
 
 static struct haldata {
-    hal_float_t C_xx;
-    hal_float_t C_xy;
-    hal_float_t C_xz;
-    hal_float_t C_yx;
-    hal_float_t C_yy;
-    hal_float_t C_yz;
-    hal_float_t C_zx;
-    hal_float_t C_zy;
-    hal_float_t C_zz;
+    hal_real_t C_xx;
+    hal_real_t C_xy;
+    hal_real_t C_xz;
+    hal_real_t C_yx;
+    hal_real_t C_yy;
+    hal_real_t C_yz;
+    hal_real_t C_zx;
+    hal_real_t C_zy;
+    hal_real_t C_zz;
 } *haldata;
 
-static int matrixkins_setup(void) {
+EXTRA_SETUP() {
+    (void)__comp_inst;
+    (void)prefix;
+    (void)extra_arg;
     int res=0;
 
     // inherit comp_id from rtapi_main()
     if (comp_id < 0) goto error;
 
-    res = hal_set_unready(comp_id);
-    if (res) goto error;
-
     haldata = hal_malloc(sizeof(struct haldata));
     if (!haldata) goto error;
 
-    res |= hal_param_float_new("matrixkins.C_xx", HAL_RW, &haldata->C_xx, comp_id);
-    res |= hal_param_float_new("matrixkins.C_xy", HAL_RW, &haldata->C_xy, comp_id);
-    res |= hal_param_float_new("matrixkins.C_xz", HAL_RW, &haldata->C_xz, comp_id);
-    res |= hal_param_float_new("matrixkins.C_yx", HAL_RW, &haldata->C_yx, comp_id);
-    res |= hal_param_float_new("matrixkins.C_yy", HAL_RW, &haldata->C_yy, comp_id);
-    res |= hal_param_float_new("matrixkins.C_yz", HAL_RW, &haldata->C_yz, comp_id);
-    res |= hal_param_float_new("matrixkins.C_zx", HAL_RW, &haldata->C_zx, comp_id);
-    res |= hal_param_float_new("matrixkins.C_zy", HAL_RW, &haldata->C_zy, comp_id);
-    res |= hal_param_float_new("matrixkins.C_zz", HAL_RW, &haldata->C_zz, comp_id);
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_xx, 1.0, "matrixkins.C_xx");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_xy, 0.0, "matrixkins.C_xy");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_xz, 0.0, "matrixkins.C_xz");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_yx, 0.0, "matrixkins.C_yx");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_yy, 1.0, "matrixkins.C_yy");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_yz, 0.0, "matrixkins.C_yz");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_zx, 0.0, "matrixkins.C_zx");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_zy, 0.0, "matrixkins.C_zy");
+    res |= hal_param_new_real(comp_id, HAL_RW, &haldata->C_zz, 1.0, "matrixkins.C_zz");
 
-    haldata->C_xx = haldata->C_yy = haldata->C_zz = 1.0;
-    haldata->C_xy = haldata->C_xz = 0.0;
-    haldata->C_yx = haldata->C_yz = 0.0;
-    haldata->C_zx = haldata->C_zy = 0.0;
-
-    if (res) goto error;
-
-    res = hal_ready(comp_id);
     if (res) goto error;
 
     rtapi_print("*** %s setup ok\n",__FILE__);
@@ -230,18 +223,17 @@ error:
     return -1;
 }
 
-#include "kinematics.h"
-#include "emcmotcfg.h"
+#include <kinematics.h>
+#include <emcmotcfg.h>
 
 KINS_NOT_SWITCHABLE
 EXPORT_SYMBOL(kinematicsType);
 EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsJacobian);
 EXPORT_SYMBOL(kinematicsForward);
 
 KINEMATICS_TYPE kinematicsType()
 {
-    static bool is_setup=0;
-    if (!is_setup) matrixkins_setup();
     return KINEMATICS_BOTH;
 }
 
@@ -259,20 +251,20 @@ int kinematicsForward(const double *j,
     // https://ardoris.wordpress.com/2008/07/18/general-formula-for-the-inverse-of-a-3x3-matrix/
     // https://en.wikipedia.org/wiki/Invertible_matrix#Inversion_of_3_%C3%97_3_matrices
 
-    double a = haldata->C_xx;
-    double b = haldata->C_xy;
-    double c = haldata->C_xz;
-    double d = haldata->C_yx;
-    double e = haldata->C_yy;
-    double f = haldata->C_yz;
-    double g = haldata->C_zx;
-    double h = haldata->C_zy;
-    double i = haldata->C_zz;
+    rtapi_real a = hal_get_real(haldata->C_xx);
+    rtapi_real b = hal_get_real(haldata->C_xy);
+    rtapi_real c = hal_get_real(haldata->C_xz);
+    rtapi_real d = hal_get_real(haldata->C_yx);
+    rtapi_real e = hal_get_real(haldata->C_yy);
+    rtapi_real f = hal_get_real(haldata->C_yz);
+    rtapi_real g = hal_get_real(haldata->C_zx);
+    rtapi_real h = hal_get_real(haldata->C_zy);
+    rtapi_real i = hal_get_real(haldata->C_zz);
 
-    double det = a * (e * i - f * h)
+    rtapi_real det = a * (e * i - f * h)
                - b * (d * i - f * g)
                + c * (d * h - e * g);
-    double invdet = 1.0 / det;
+    rtapi_real invdet = 1.0 / det;
 
     // Apply inverse matrix transform to the 3 cartesian coordinates
     pos->tran.x = invdet * ( (e * i - f * h) * j[0]
@@ -305,15 +297,15 @@ int kinematicsInverse(const EmcPose * pos,
 {
     (void)iflags;
     (void)fflags;
-    double a = haldata->C_xx;
-    double b = haldata->C_xy;
-    double c = haldata->C_xz;
-    double d = haldata->C_yx;
-    double e = haldata->C_yy;
-    double f = haldata->C_yz;
-    double g = haldata->C_zx;
-    double h = haldata->C_zy;
-    double i = haldata->C_zz;
+    rtapi_real a = hal_get_real(haldata->C_xx);
+    rtapi_real b = hal_get_real(haldata->C_xy);
+    rtapi_real c = hal_get_real(haldata->C_xz);
+    rtapi_real d = hal_get_real(haldata->C_yx);
+    rtapi_real e = hal_get_real(haldata->C_yy);
+    rtapi_real f = hal_get_real(haldata->C_yz);
+    rtapi_real g = hal_get_real(haldata->C_zx);
+    rtapi_real h = hal_get_real(haldata->C_zy);
+    rtapi_real i = hal_get_real(haldata->C_zz);
 
     // Apply matrix transform to the 3 cartesian coordinates
     j[0] = pos->tran.x * a + pos->tran.y * b + pos->tran.z * c;
@@ -328,5 +320,32 @@ int kinematicsInverse(const EmcPose * pos,
     if (EMCMOT_MAX_JOINTS > 7) j[7] = pos->v;
     if (EMCMOT_MAX_JOINTS > 8) j[8] = pos->w;
 
+    return 0;
+}
+
+int kinematicsJacobian(const double *j,
+                       const EmcPose * pos,
+                       double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                       const KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    int r, c;
+    (void)j;
+    (void)pos;
+    (void)iflags;
+    for (r = 0; r < EMCMOT_MAX_JOINTS; r++) {
+        for (c = 0; c < EMCMOT_MAX_AXIS; c++) { jac[r][c] = 0; }
+    }
+    // the inverse is the calibration matrix itself, so its derivative is
+    // that matrix, and the pass-through axes are ones
+    jac[0][0] = hal_get_real(haldata->C_xx);
+    jac[0][1] = hal_get_real(haldata->C_xy);
+    jac[0][2] = hal_get_real(haldata->C_xz);
+    jac[1][0] = hal_get_real(haldata->C_yx);
+    jac[1][1] = hal_get_real(haldata->C_yy);
+    jac[1][2] = hal_get_real(haldata->C_yz);
+    jac[2][0] = hal_get_real(haldata->C_zx);
+    jac[2][1] = hal_get_real(haldata->C_zy);
+    jac[2][2] = hal_get_real(haldata->C_zz);
+    for (r = 3; r < 9; r++) { jac[r][r] = 1; }
     return 0;
 }

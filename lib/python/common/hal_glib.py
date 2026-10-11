@@ -4,6 +4,7 @@
 import _hal, hal
 import linuxcnc
 import os
+import axis_kinds
 import math
 
 from gi.repository import GObject
@@ -24,10 +25,14 @@ except:
 JOGJOINT  = 1
 JOGTELEOP = 0
 
+# which axes are angles, as [AXIS_<letter>] TYPE says
+AXIS_ANGULAR = axis_kinds.angular(None)
+
 # add try for QtVCP Designer and probably GTK GLADE editor too
 # The INI file is not available then
 try:
     inifile = linuxcnc.ini(os.environ['INI_FILE_NAME'])
+    AXIS_ANGULAR = axis_kinds.angular(inifile)
     trajcoordinates = inifile.find("TRAJ", "COORDINATES").lower().replace(" ", "")
     jointcount = inifile.getint("KINS", "JOINTS")
 except:
@@ -219,6 +224,7 @@ class _GStat(GObject.GObject):
         'graphics-loading-progress': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_INT,)),
         'graphics-gcode-error': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_STRING,)),
         'graphics-gcode-properties': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_PYOBJECT,)),
+        'graphics-program-time': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_PYOBJECT,)),
         'graphics-view-changed': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, (GObject.TYPE_STRING, GObject.TYPE_PYOBJECT)),
         'mdi-history-changed': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, ()),
         'machine-log-changed': (GObject.SignalFlags.RUN_FIRST, GObject.TYPE_NONE, ()),
@@ -287,7 +293,7 @@ class _GStat(GObject.GObject):
     STATE_ON = linuxcnc.STATE_ON
     STATE_OFF = linuxcnc.STATE_OFF
 
-    group0 = ('G4', 'G10','G28', 'G30', 'G52', 'G53', 'G92', 'G92.1', 'G92.2', 'G92.3')
+    group0 = ('G4', 'G10','G28', 'G28.2', 'G30', 'G52', 'G53', 'G92', 'G92.1', 'G92.2', 'G92.3')
     group1 = ('G0', 'G1', 'G2', 'G3', 'G33', 'G38.n', 'G73', 'G76', 'G80', 'G81',\
              'G82', 'G83', 'G84', 'G85', 'G86', 'G87', 'G88', 'G89')
     group2 = ('G17', 'G18', 'G19', 'G17.1', 'G18.1', 'G19.1')
@@ -330,6 +336,7 @@ class _GStat(GObject.GObject):
         self._status_active = False
         self.old = {}
         self.old['tool-prep-number'] = 0
+        self._file_load_pending = False
         self.previous_mode = self.MANUAL
         try:
             self.stat.poll()
@@ -677,6 +684,17 @@ class _GStat(GObject.GObject):
             # a reload of the preview and sourceview widgets
             if self.stat.interp_state == linuxcnc.INTERP_IDLE and file_new != "":
                 self.emit('file-loaded', file_new)
+            elif file_new != "":
+                # also defer a legit program that was opened and started
+                # before this poll saw it, or the GUI never shows it
+                self._file_load_pending = True
+            else:
+                self._file_load_pending = False
+        if self._file_load_pending and \
+                self.stat.interp_state == linuxcnc.INTERP_IDLE and \
+                self.old['file']:
+            self._file_load_pending = False
+            self.emit('file-loaded', self.old['file'])
 
         #ToDo : Find a way to avoid signal when the line changed due to
         #       a remap procedure, because the signal do highlight a wrong
@@ -1390,7 +1408,7 @@ class _GStat(GObject.GObject):
         if direction == 0:
             self.cmd.jog(linuxcnc.JOG_STOP, jjogmode, j_or_a)
         else:
-            if axisnum in (3,4,5):
+            if AXIS_ANGULAR[axisnum]:
                 rate = self.current_angular_jog_rate
             else:
                 rate = self.current_jog_rate/60

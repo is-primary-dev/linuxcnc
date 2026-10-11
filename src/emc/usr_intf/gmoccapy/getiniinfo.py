@@ -47,14 +47,20 @@ class GetIniInfo:
             sys.exit()
 
     def get_cycle_time(self):
-        temp = self.inifile.getint("DISPLAY", "CYCLE_TIME")
-        try:
-            return temp
-        except:
-            message = ("Wrong entry [DISPLAY] CYCLE_TIME in INI File! ")
-            message += ("Will use gmoccapy default 150")
-            LOG.warning(message)
-            return 150
+        temp = self.inifile.getreal("DISPLAY", "CYCLE_TIME")
+        if temp is not None:
+            # Can be in seconds or milliseconds and, regardless,
+            # the result must be larger than zero to be valid.
+            # This brings gmoccapy in line with f.ex. AXIS.
+            if temp >= 0.001 and temp < 1.0:
+                return int(temp * 1000.0) # Assume seconds
+            elif temp >= 1.0:
+                return int(temp) # Assume milliseconds
+        # Otherwise, undefined or less or equal to zero
+        message = ("Wrong entry [DISPLAY] CYCLE_TIME in INI File! ")
+        message += ("Will use gmoccapy default 150")
+        LOG.warning(message)
+        return 150
 
     def get_postgui_halfile(self):
         postgui_halfile = self.inifile.findall("HAL", "POSTGUI_HALFILE") or None
@@ -343,10 +349,13 @@ class GetIniInfo:
                 raw_ext = data.split(",")
                 for extension in raw_ext:
                     ext = extension.split()
-                    ext_list.append(ext[0].replace(".", "*."))
+                    if ext[0] == "no_ngc":
+                        ext_list.remove("*.ngc")
+                    else:
+                        ext_list.append(ext[0].replace(".", "*."))
         else:
-            LOG.warning("Error converting the file extensions from INI file [FILTER]PROGRAM_PREFIX, "
-            "using as default '*.ngc'")
+            LOG.warning("Error converting the file extensions from INI file [FILTER]PROGRAM_EXTENSION, "
+            "Using default '.ngc'")
             ext_list = ["*.ngc"]
         return ext_list
 

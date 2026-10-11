@@ -728,6 +728,7 @@ class ActionButton(IndicatedPushButton):
                 except:
                     pass
                 return
+            ACTION.RECORD_CURRENT_MODE()
             # we prefer named INI MDI commands:
             if not self.ini_mdi_keystring == '' and \
                     not INFO.get_ini_mdi_command(self.ini_mdi_keystring) is None:
@@ -747,9 +748,18 @@ class ActionButton(IndicatedPushButton):
             if not STATUS.get_current_command() == '':
                 if self._is_mdi_command_finished:
                     self._watch_command_flag = True
-
+            # nothing moved reset mode
+            else:
+                ACTION.RESTORE_RECORDED_MODE()
         elif self.ini_macro_command:
             #print('macro',self.ini_macro_keystring,self.ini_macro_num)
+            if self.is_in_mdi_mode_check and not STATUS.is_mdi_mode():
+                try:
+                    self.QTVCP_INSTANCE_.add_status('INI MACRO COMMAND: Not in MDI Mode', WARNING, noLog=False)
+                except:
+                    pass
+                return
+            ACTION.RECORD_CURRENT_MODE()
             # we prefer named INI MACRO commands:
             if not self.ini_macro_keystring == '' and \
                     not INFO.get_ini_macro_command(self.ini_macro_keystring) is None:
@@ -769,7 +779,9 @@ class ActionButton(IndicatedPushButton):
             if not STATUS.get_current_command() == '':
                 if self._is_mdi_command_finished:
                     self._watch_command_flag = True
-
+            # nothing moved reset mode
+            else:
+                ACTION.RESTORE_RECORDED_MODE()
         elif self.dro_absolute:
             STATUS.emit('dro-reference-change-request', 0)
         elif self.dro_relative:
@@ -819,7 +831,7 @@ class ActionButton(IndicatedPushButton):
         else:
             actuator = STATUS.get_selected_axis()
         if direction == 0:
-            if actuator in (3,4,5,'A','B','C'): # angualar axis
+            if INFO.is_angular(actuator, STATUS.is_joint_mode()):
                 if STATUS.get_jog_increment_angular() != 0: return
             elif STATUS.get_jog_increment() != 0: return
         if direction:
@@ -837,7 +849,7 @@ class ActionButton(IndicatedPushButton):
         else:
             actuator = self.axis
         if direction == 0:
-            if actuator in (3,4,5,'A','B','C'): # anglar axis
+            if INFO.is_angular(actuator, STATUS.is_joint_mode()):
                 if STATUS.get_jog_increment_angular() != 0: return
             elif STATUS.get_jog_increment() != 0: return
         if direction:

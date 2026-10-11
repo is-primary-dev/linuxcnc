@@ -27,10 +27,8 @@ namespace bp = boost::python;
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "rs274ngc.hh"
-#include "rs274ngc_return.hh"
 #include "rs274ngc_interp.hh"
 #include "interp_internal.hh"
-#include <rtapi_string.h>
 
 #include <string>
 #include <string_view>
@@ -77,8 +75,13 @@ bool Interp::is_user_defined_m_code(block_pointer block, setup_pointer settings,
     return (is_m_code_remappable(m_code) && settings->m_remapped[m_code]);
 }
 
+// the tilted work plane codes are built in, but configs that remap them,
+// like the nutating TWP sims, keep their own
 bool Interp::is_g_code_remappable(int g_code)
-{ return g_code > 0 && g_code < 1000 && gees[g_code] == -1; }
+{
+    return g_code > 0 && g_code < 1000 &&
+           (gees[g_code] == -1 || g_code == G_68_2 || g_code == G_68_4 || g_code == G_69);
+}
 
 bool Interp::is_user_defined_g_code(int g_code)
 { return is_g_code_remappable(g_code) && _setup.g_remapped[g_code]; }
@@ -416,7 +419,7 @@ int Interp::parse_remap(const char *inistring, int lineno)
     memset((void *)&r, 0, sizeof(remap));
     r.modal_group = -1; // mark as unset, required param for m/g
     r.motion_code = INT_MIN;
-    rtapi_strxcpy(iniline, inistring);
+    rs274ngc_strxcpy(iniline, inistring);
     // strip trailing comments
     if ((s = strchr(iniline, '#')) != NULL) {
 	*s = '\0';

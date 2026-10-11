@@ -48,7 +48,7 @@ void WithRoot::init(uid_t ruid_ini, uid_t euid_ini) {
 }
 
 RtapiTask::RtapiTask()
-    : magic{}, id{}, owner{}, uses_fp{}, stacksize{}, prio{}, period{}, nextstart{}, pll_correction{},
+    : magic{}, id{}, owner{}, stacksize{}, prio{}, period{}, nextstart{}, pll_correction{},
       pll_correction_limit{}, arg{}, taskcode{}
 
 {
@@ -113,15 +113,14 @@ int RtapiApp::prio_next_lower(int prio) const {
 int RtapiApp::allocate_task_id() {
     for (int n = 0; n < MAX_TASKS; n++) {
         RtapiTask **taskptr = &(task_array[n]);
-        if (__sync_bool_compare_and_swap(taskptr, (RtapiTask *)0, TASK_MAGIC_INIT))
+        if (__sync_bool_compare_and_swap(taskptr, (RtapiTask *)nullptr, TASK_MAGIC_INIT))
             return n;
     }
     return -ENOSPC;
 }
 
 int RtapiApp::task_new(
-    void (*taskcode)(void *), void *arg, int prio, int owner, unsigned long int stacksize, int /*uses_fp*/
-) {
+    void (*taskcode)(void *), void *arg, int prio, int owner, unsigned long int stacksize) {
     /* check requested priority */
     if (!prio_check(prio)) {
         rtapi_print_msg(
@@ -144,8 +143,6 @@ int RtapiApp::task_new(
         stacksize = (1024 * 1024);
     task->id = n;
     task->owner = owner;
-    /* uses_fp is deprecated and ignored; always save FPU state */
-    task->uses_fp = 1;
     task->arg = arg;
     task->stacksize = stacksize;
     task->taskcode = taskcode;

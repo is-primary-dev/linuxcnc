@@ -42,7 +42,6 @@
     information, go to www.linuxcnc.org.
 */
 
-#include "config.h"
 #include <linuxcnc.h>
 
 #ifndef NO_INI
@@ -147,7 +146,6 @@ struct halcmd_command halcmd_commands[] = {
     {"ptype",   FUNCT(do_ptype_cmd, cp),       A_ONE },
     {"stype",   FUNCT(do_stype_cmd, cp),       A_ONE },
     {"help",    FUNCT(do_help_cmd, cp),        A_ONE | A_OPTIONAL },
-    {"linkpp",  FUNCT(do_linkpp_cmd, cp_cp),   A_TWO | A_REMOVE_ARROWS },
     {"linkps",  FUNCT(do_linkps_cmd, cp_cp),   A_TWO | A_REMOVE_ARROWS },
     {"linksp",  FUNCT(do_linksp_cmd, cp_cp),   A_TWO | A_REMOVE_ARROWS },
     {"list",    FUNCT(do_list_cmd, cp_cpp),    A_ONE | A_PLUS },
@@ -296,16 +294,16 @@ static void quit(int sig)
    work for each command.
 */
 
-static int count_args(char **argv) {
+static int count_args(const char **argv) {
     int i = 0;
     while(argv[i] && argv[i][0]) i++;
     return i;
 }
 
-#define ARG(i) (argc > i ? argv[i] : 0)
+#define ARG(i) (argc > i ? argv[i] : NULL)
 #define REST(i) (argc > i ? argv + i : argv + argc)
 
-static int parse_cmd1(char **argv) {
+static int parse_cmd1(const char **argv) {
     struct halcmd_command *command = bsearch(argv[0],
                 halcmd_commands, halcmd_ncommands,
 		sizeof(struct halcmd_command), compare_command);
@@ -340,7 +338,7 @@ static int parse_cmd1(char **argv) {
 		    argv[d++] = argv[s];
 		}
 	    }
-	    argv[d] = 0;
+	    argv[d] = NULL;
 	    argc = d;
 	}
 
@@ -420,7 +418,7 @@ static int parse_cmd1(char **argv) {
 	    int i;
 	    for(i=0; i<argc; i++)
 	    {
-		free(argv[i]);
+		free((void *)argv[i]);
 	    }
 	}
 #endif
@@ -429,7 +427,7 @@ static int parse_cmd1(char **argv) {
     }
 }
 
-int halcmd_parse_cmd(char *tokens[])
+int halcmd_parse_cmd(const char *tokens[])
 {
     int retval;
     static int first_time = 1;
@@ -452,7 +450,7 @@ int halcmd_parse_cmd(char *tokens[])
    and comment removal have already been done, and that any
    trailing newline has been removed.
 */
-static int tokenize(char *cmd_buf, char **tokens)
+static int tokenize(char *cmd_buf, const char **tokens)
 {
     enum { BETWEEN_TOKENS,
            IN_TOKEN,
@@ -812,7 +810,7 @@ static const char *replace_errors[] = {
 };
 
 
-int halcmd_preprocess_line ( char *line, char **tokens )
+int halcmd_preprocess_line (char *line, const char **tokens )
 {
     int retval;
     char *detail = NULL;
@@ -850,7 +848,7 @@ int halcmd_preprocess_line ( char *line, char **tokens )
 }
 
 int halcmd_parse_line(char *line) {
-    char *tokens[MAX_TOK+1];
+    const char *tokens[MAX_TOK+1];
     int result = halcmd_preprocess_line(line, tokens);
     if(result < 0) return result;
     return halcmd_parse_cmd(tokens);

@@ -34,8 +34,8 @@
 #define GENSERKINS_H
 
 #include <hal.h>                /* HAL data types */
-#include <gotypes.h>                /* go_result, go_integer */
-#include <gomath.h>                /* go_pose */
+#include "libposemath/gotypes.h"    /* go_result, go_integer */
+#include "libposemath/gomath.h"    /* go_pose */
 #include <kinematics.h>
 
 /*!
@@ -76,7 +76,7 @@
 typedef struct {
   go_link links[GENSER_MAX_JOINTS]; /*!< The link description of the device. */
   int link_num;                /*!< How many are actually present. */
-  hal_u32_t iterations;        /*!< How many iterations were actually used to compute the inverse kinematics. */
+  unsigned iterations;         /*!< How many iterations were actually used to compute the inverse kinematics. */
 } genser_struct;
 
 extern int genser_kin_size(void);
@@ -141,6 +141,11 @@ extern int compute_jfwd(go_link * link_params,
 
 extern int compute_jinv(go_matrix * Jfwd,
                         go_matrix * Jinv);
+
+extern int genserKinematicsJacobian(const double *joint,
+                                    const EmcPose *world,
+                                    double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                                    const KINEMATICS_INVERSE_FLAGS *iflags);
 
 extern int genserKinematicsForward(const double *joint,
                                    EmcPose * world,

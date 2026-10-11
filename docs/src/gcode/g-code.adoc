@@ -70,9 +70,11 @@ as the 'L number', and so on for any other letter.
 |<<gcode:g10-l11,G10 L11>>         |Set Tool Table, Calculated, Fixture
 |<<gcode:g10-l2,G10 L2>>           |Coordinate System Origin Setting
 |<<gcode:g10-l20,G10 L20>>         |Coordinate System Origin Setting Calculated
+|<<gcode:g12.1-g13.1,G12.1 G13.1>> |Select Kinematics
 |<<gcode:g17-g19.1,G17 - G19.1>>   |Plane Select
 |<<gcode:g20-g21,G20 G21>>         |Set Units of Measure
 |<<gcode:g28-g28.1,G28 - G28.1>>   |Go to Predefined Position
+|<<gcode:g28.2,G28.2>>             |Home from G-code
 |<<gcode:g30-g30.1,G30 - G30.1>>   |Go to Predefined Position
 |<<gcode:g33,G33>>                 |Spindle Synchronized Motion
 |<<gcode:g33.1,G33.1>>             |Rigid Tapping
@@ -83,6 +85,7 @@ as the 'L number', and so on for any other letter.
 |<<gcode:g43,G43>>                 |Use Tool Length Offset from Tool Table
 |<<gcode:g43.1,G43.1>>             |Dynamic Tool Length Offset
 |<<gcode:g43.2,G43.2>>             |Apply additional Tool Length Offset
+|<<gcode:g43.4,G43.4>>             |Tool Length Offset on Primary Kinematics
 |<<gcode:g49,G49>>                 |Cancel Tool Length Offset
 |<<gcode:g52,G52>>                 |Local Coordinate System Offset
 |<<gcode:g53,G53>>                 |Move in Machine Coordinates
@@ -90,6 +93,7 @@ as the 'L number', and so on for any other letter.
 |<<gcode:g61,G61>>                 |Exact Path Mode
 |<<gcode:g61.1,G61.1>>             |Exact Stop Mode
 |<<gcode:g64,G64>>                 |Path Control Mode with Optional Tolerance
+|<<gcode:g68.2,G68.2 G68.4 G69>>       |Tilted Work Plane
 |<<gcode:g70,G70>>                 |Lathe finishing cycle
 |<<gcode:g71-g72,G71-G72>>         |Lathe roughing cycle
 |<<gcode:g73,G73>>                 |Drilling Cycle with Chip Breaking
@@ -934,6 +938,78 @@ It is an error if:
 * The P number does not evaluate to an integer in the range 0 to 9.
 * An axis is programmed that is not defined in the configuration.
 
+[[gcode:g12.1-g13.1]]
+== G12.1, G13.1 Select Kinematics(((G12.1, G13.1 Select Kinematics)))
+
+----
+G12.1 P-
+G13.1
+----
+
+'G12.1' selects one of the kinematics provided by a switchable kinematics
+module; the 'P' word is the kinematics number. 'G13.1' cancels back to
+identity kinematics, where joints and coordinates are the same thing.
+Which number that is is declared by the module itself, so 'G13.1' means
+the same kinematics whatever order a module lists its types in.
+
+[WARNING]
+Deprecation notice: selecting the kinematics by writing the
+`motion.switchkins-type` HAL pin is deprecated. It takes the same
+numbering and still works, but it does not tell the interpreter that
+anything changed, so a program is read, its limits checked and its path
+looked ahead in whatever kinematics the interpreter last knew about,
+which need not be the one that runs it. Use 'G12.1' and 'G13.1'.
+
+Both codes are queue synchronisation points. The interpreter waits for
+queued motion to finish before the kinematics changes, so no move is ever
+planned in one kinematics and executed in another. Because of that, both
+codes stop any blending that was in progress, in the same way 'G4' does.
+
+The kinematics module decides what each number means, and declares
+which one is identity. See the `switchkins` section of the kins(9) man
+page for the modules that support switching and the order in which they
+list their kinematics. A machine whose kinematics module is not
+switchable rejects the change, and 'G13.1' is an error on a switchable
+module that declares no identity kinematics; such a module can still be
+driven by number with 'G12.1'.
+
+Selecting a kinematics does not move the machine. It changes how joint
+positions and coordinate positions map onto each other, so the position
+readout can change even though nothing has moved.
+
+The active kinematics is available to the program as the read-only
+parameter '#<_kins_type>', which lets a subroutine put back whatever was
+selected before it ran:
+
+[source,ngc]
+----
+#<saved> = #<_kins_type>
+G12.1 P2      (work in kinematics 2)
+( ... )
+G12.1 P#<saved> (put back whatever the caller was using)
+----
+
+Nothing cancels the selection on its own. It survives the end of the
+program and an abort, so that the kinematics keeps matching what the
+position readout shows. End a program with 'G13.1' if it should leave the
+machine in identity kinematics.
+
+.G12.1, G13.1 Example
+[source,ngc]
+----
+G12.1 P1  (switch to kinematics 1)
+G0 X0 Y0
+G13.1     (back to identity kinematics)
+----
+
+It is an error if:
+
+* 'G12.1' is used without a 'P' word.
+* The 'P' word is negative.
+* The 'P' word names a kinematics the module does not provide.
+* A 'P' word is used with 'G13.1'.
+* 'G13.1' is used and the module declares no identity kinematics.
+
 [[gcode:g17-g19.1]]
 == G17 - G19.1 Plane Select(((G17 - G19.1 Plane Select)))
 
@@ -997,6 +1073,81 @@ It is an error if :
 
 * Cutter Compensation is turned on
 
+[[gcode:g28.2]]
+== G28.2 Home from G-code(((G28.2 Home from G-code)))
+
+This non-modal code lets a program or MDI line reference the machine
+instead of requiring the operator to use the GUI's *Home All* button. It
+follows the same modal-group-0 pattern as `G28.1`/`G30.1`, takes no axis
+words, and *requires* a `P` word saying what to home.
+
+* 'G28.2 P-1' - runs the homing cycle on every joint, in `HOME_SEQUENCE`
+  order (the same operation as the GUI *Home All*). This form requires the
+  config to set `[JOINT_n]HOME_SEQUENCE`; exactly as with *Home All*, a
+  config with no `HOME_SEQUENCE` cannot home all joints at once and the
+  command fails, leaving the machine in joint mode.
+* 'G28.2 Pn' - runs the homing cycle on joint 'n' only, where 'n' is the
+  0-based joint number matching its `[JOINT_n]` INI section (the same
+  numbering used by `HOME_SEQUENCE` and by joint jogging). Other joints are
+  left as they are, and `HOME_SEQUENCE` is not required for the `Pn` form.
+  How many joints actually home depends on the `HOME_SEQUENCE` of joint 'n':
++
+--
+** a *negative* (synchronized) sequence homes the whole synchronized group -
+   `Pn` on either joint of a gantry pair homes both;
+** a *positive* sequence shared with other joints homes only joint 'n' -
+   use `G28.2 P-1` to home the shared group together;
+** no sequence, or a sequence not shared with any other joint, homes just
+   joint 'n'.
+--
+
+[WARNING]
+There is no bare `G28.2`. Homing drives joints onto their switches at
+homing speed, ignoring soft limits, from wherever the machine happens to
+be, so homing the whole machine has to be asked for explicitly with `P-1`
+rather than being what a truncated or mistyped line does. A `G28.2` with no
+`P` word is an error and stops the program.
+
+.G28.2 Example Lines
+[source,ngc]
+----
+G28.2 P-1   (home all joints, in HOME_SEQUENCE order)
+G28.2 P1    (home joint 1 only)
+----
+
+A queued `G28.2` dips motion into free mode for the duration of the homing
+cycle and restores whatever mode (manual/MDI/auto) was active once it
+finishes, so the mode dip is invisible at the task level. Motion still
+enforces its own safety: the home is honored only when the machine is idle
+(in position with no queued motion) or in joint mode, and a home is refused
+mid-motion. Homing inhibits and per-joint limit handling are unchanged.
+
+[NOTE]
+When the homing cycle finishes, the interpreter resyncs its model of the
+current position from the machine (the same way it does after probing or a
+tool change), so a following move made in incremental distance mode
+(`G91`), or an arc whose center is given with `I`/`J`/`K`, is computed from
+where the machine actually is after homing. `G28.2` is a queue point: read
+ahead stops at it and resumes once the cycle has run. `G5x`/`G92` offsets
+that were active before the `G28.2` are still applied afterward and now
+refer to the newly established machine zero; clear or re-establish them if
+that is not what you want.
+
+[NOTE]
+There is no G-code unhome. Clearing a joint's reference is done from the
+GUI, halui or linuxcncrsh.
+
+[NOTE]
+`G28.2` is a LinuxCNC extension; there is no standard Fanuc equivalent.
+
+It is an error if:
+
+* Cutter radius compensation is active (`G41`, `G41.1`, `G42` or `G42.1`).
+* An axis word is present ('G28.2' takes no axis words).
+* The 'P' word is missing.
+* The 'P' word is not a whole number, or is negative other than `P-1`.
+* The 'P' word names a joint number the machine does not have.
+
 [[gcode:g30-g30.1]]
 == G30, G30.1 Go/Set Predefined Position(((G30 Go/Set Predefined Position)))
 
@@ -1041,10 +1192,11 @@ It is an error if :
 
 [source,ngc]
 ----
-G33 X- Y- Z- K- $-
+G33 X- Y- Z- K- $- D-
 ----
 
 * 'K' - distance per revolution
+* 'D' - (optional) start angle offset from the spindle index pulse, in degrees
 
 For spindle-synchronized motion in one direction, code 'G33 X- Y- Z- K-'
 where K gives the distance moved in XYZ for each revolution of the
@@ -1064,6 +1216,20 @@ speed pins, so multiple passes line up. 'G33' moves end at the programmed
 endpoint.
 G33 could be used to cut tapered threads or a fusee.
 
+The (optional) 'D' argument delays the start of the motion until the spindle
+has turned 'D' degrees past the index pulse, instead of starting at the index
+pulse itself. If 'D' is omitted the default is zero, which starts at the index
+pulse as before. This is how successive starts of a multi-start thread are cut:
+the same thread program is run once per start, each with a different 'D'.
+For example, a two-start thread is cut with 'D0' and then 'D180'; a three-start
+thread with 'D0', 'D120' and 'D240'.
+
+[NOTE]
+'D' is an angle past the index pulse and so is only meaningful as a positive
+number. A negative value is not an error: its magnitude is used, so 'D-90'
+behaves exactly as 'D90'. Values of 360 or more are not reduced, so 'D450'
+waits a full turn longer than 'D90'.
+
 All the axis words are optional, except that at least one must be used.
 
 [NOTE]
@@ -1071,16 +1237,35 @@ K follows the drive line described by 'X- Y- Z-'. K is not parallel to
 the Z axis if X or Y endpoints are used for example when cutting tapered
 threads.
 
+[NOTE]
+The spindle speed override has no effect during a G33 move, and the previous
+setting is restored when the move ends. The commanded position follows the
+spindle, but the axis lags it by an amount proportional to speed, so changing
+the speed part way through shifts the tool along the helix it is already
+cutting. A <<gcode:g76,G76>> cycle holds the override at the value the cycle
+started with rather than dropping it, because the whole cycle is one block; a
+G33 thread is one pass per line with the retract in between, so there is no
+span to hold.
+
 [[gcode:g33-tech-info]]
 .Technical Info
-At the beginning of each G33 pass, LinuxCNC uses the spindle speed and
-the machine acceleration limits to calculate how long it will take Z to
-accelerate after the index pulse, and determines how many degrees the
-spindle will rotate during that time. It then adds that angle to the
-index position and computes the Z position using the corrected spindle
-angle. That means that Z will reach the correct position just as it
-finishes accelerating to the proper speed, and can immediately begin
-cutting a good thread.
+A G33 move waits for the spindle index, then accelerates from rest to the
+synchronized feed. The commanded position follows the spindle angle measured
+from that index, so a given thread is cut in the same place whatever the
+spindle speed.
+
+While the axis is still accelerating it falls behind that position, by roughly
+the pitch squared times the spindle speed squared over twice the axis
+acceleration limit, and it makes the distance up over the rest of the move.
+Allow enough lead-in for it to catch up before the cut begins, or the start of
+the thread is cut with the wrong lead. LinuxCNC reports 'lead-in too short to
+reach sync' when the move ends before the axis has caught up. A small lag
+proportional to speed remains for the rest of the move, which is why the
+spindle speed must not change while a thread is being cut.
+
+When a 'D' offset is programmed the axis is instead held at rest until the
+spindle reaches the requested angle, and tracking begins from there. Allow
+enough clearance before the thread for the axis to accelerate from that point.
 
 .HAL Connections
 The pin 'spindle.N.at-speed' must be set or driven true for the motion to
@@ -1109,9 +1294,19 @@ M2 (end program)
 It is an error if:
 
 * All axis words are omitted.
-* The spindle is not turning when this command is executed.
-* The requested linear motion exceeds machine velocity limits
-  due to the spindle speed.
+* No K word is given.
+* An F word is given (the feed follows from K and the spindle speed).
+* The selected spindle is not commanded to turn (M3 or M4 active) when
+  this command is executed.
+* The pitch and the spindle speed together ask an axis to move faster than
+  its maximum velocity.
+
+[NOTE]
+In constant surface speed mode the spindle speed follows the radius, so the
+check uses the fastest speed the move can reach: the speed at its smallest
+cutting radius, limited by the G96 'D' word and by
+`[SPINDLE_n]MAX_FORWARD_VELOCITY`. If the move reaches the centre of rotation
+and neither limit is set the speed is unbounded and no check is made.
 
 [[gcode:g33.1]]
 == G33.1 Rigid Tapping(((G33.1 Rigid Tapping)))
@@ -1123,6 +1318,7 @@ G33.1 X- Y- Z- K- I- $-
 
 * 'K' - distance per revolution
 * 'I' - optional spindle speed multiplier for faster return move
+  (values less than 1 are treated as 1)
 * '$' - optional spindle selector
 
 [WARNING]
@@ -1172,12 +1368,22 @@ M2 (end program)
 * See <<gcode:g90-g91,G90>> & <<gcode:g0,G0>> & <<mcode:m2-m30,M2>>
   sections for more information.
 
+[NOTE]
+Unlike G33, the spindle speed override stays active during a G33.1 move and the
+feed follows whatever the spindle actually does. A tap guides itself in its own
+hole, so there is no thread lead to spoil, and being able to slow the spindle
+while the tap is in the work is useful.
+
 It is an error if:
 
 * All axis words are omitted.
-* The spindle is not turning when this command is executed
-* The requested linear motion exceeds machine velocity limits
-  due to the spindle speed
+* No K word is given.
+* An F word is given (the feed follows from K and the spindle speed).
+* The selected spindle is not commanded to turn (M3 or M4 active) when
+  this command is executed.
+* The pitch and the spindle speed together ask an axis to move faster than
+  its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+  in constant surface speed mode.
 
 [[gcode:g38]]
 == G38._n_ Straight Probe(((G38.n Probe)))
@@ -1263,6 +1469,28 @@ G38.2 Z-100 F100
 G10 L1 P#5400 Z#<zworkoffset> (set new tool offset)
 G43
 ----
+
+[[gcode:probe-machine-coordinates]]
+Probe results in #5061 to #5069 are expressed in the current work
+coordinate system, not in machine coordinates. To convert one, add the
+offset between the two frames. That offset is the difference between the
+current position reported in both frames at once: #5021 to #5029 hold the
+absolute machine position and #5420 to #5428 hold the work position.
+Because the offset is the same everywhere, it can be read at any later
+position and still applies to the earlier probe result.
+
+.Reading the machine coordinates of a probe
+[source,ngc]
+----
+G38.2 Z-100 F100
+#<zmachine> = [#5063 + #5023 - #5422]
+----
+
+#5063 is the probed Z in the work frame, and #5023 - #5422 is the
+machine-to-work Z offset (current machine Z minus current work Z). The
+same pattern applies to the other axes using their respective parameters.
+This holds whichever coordinate system, G92/G52 or tool length offset is
+active, as long as no coordinate-system rotation is in effect.
 
 A comment of the form '(PROBEOPEN filename.txt)' will open
 'filename.txt' and store the 9-number coordinate consisting of
@@ -1406,8 +1634,10 @@ G43 <H->
 
 'G43 H__n__' uses the offset for tool _n_.
 
-The active tool length compensation values are stored in the numbered
-parameters '5401-5409'.
+The tool length compensation values actually applied to motion are stored
+in the numbered parameters '5081-5089'.  The numbered parameters
+'5401-5409' instead hold the loaded tool's stored offset, refreshed on tool
+change ('M6') and 'G10 L1'/'L10'/'L11'.
 
 [NOTE]
 'G43 H0' is a little special.  Its behavior is different on random
@@ -1513,10 +1743,58 @@ It is an error if:
 
 NOTE: G43.2 does not write to the tool table.
 
+[[gcode:g43.4]]
+== G43.4 Tool Length Offset on Primary Kinematics(((G43.4 Tool Length Offset on Primary Kinematics)))
+
+[source,ngc]
+----
+G43.4 <H->
+----
+
+* 'H' - tool number (optional)
+
+'G43.4' is 'G43' together with a switch to the kinematics the module
+declares its working transform, so the program runs with tool length
+compensation in the module's working kinematics. The switch happens
+first and the offset applies after it, as if the two had been written
+on consecutive lines. 'G49' is the matching cancel: it clears the
+offset and switches back to identity kinematics, as long as the offset
+in effect is still 'G43.4''s and no 'G12.1' or 'G13.1' has selected a
+kinematics since.
+
+The H word, the offset itself and the parameters it lands in are
+'G43''s. Which kinematics is the working one is declared by the module
+(KINSTYPE_PRIMARY, see the <<cha:switchable-kinematics,Switchable
+Kinematics>> chapter), the number is not the answer; a module that
+declares none rejects 'G43.4' at read time.
+
+The switch is a queue synchronisation point like
+'<<gcode:g12.1-g13.1,G12.1>>': when 'G43.4' or 'G49' changes the
+kinematics, the interpreter waits for queued motion to finish first, so
+both stop any blending in progress. Already on the target kinematics
+they do not switch and blend normally. A plain 'G43', 'G43.1' or
+'G43.2' never switches, whatever kinematics is selected, and the 'G49'
+that cancels one of them does not switch either.
+
+On a machine without switchable kinematics there is nothing to switch:
+'G43.4' is a plain 'G43' and 'G49' a plain cancel.
+
+It is an error if:
+
+* the kinematics module is switchable but declares no primary
+  kinematics, or
+* any of the 'G43' error conditions holds.
+
 [[gcode:g49]]
 == G49 Cancel Tool Length Compensation(((G49 Cancel Tool Length Offset)))
 
 * 'G49' - cancels tool length compensation
+
+'G49' also switches a switchable kinematics module back to its identity
+kinematics when it cancels a 'G43.4', undoing the switch that made. It
+leaves a kinematics selected by 'G12.1' or 'G13.1' alone, as it does
+after a plain 'G43', and a module that declares no identity kinematics
+gets the plain cancel.
 
 It is OK to program using the same offset already in use. It is also
 OK to program using no tool length offset if none is currently being
@@ -1532,6 +1810,7 @@ G52 axes
 
 G52 is used in a part program as a temporary "local coordinate system offset" within the workpiece coordinate system.
 For more information about `G92` and `G52` and how they interact see <<sec:g52-and-g92-offsets,Local and Global Offsets>>.
+Inside a <<gcode:g68.2,tilted work plane>> G52 shifts the plane along its own axes instead.
 
 [[gcode:g53]]
 == G53 Move in Machine Coordinates(((G53 Machine Coordinates)))
@@ -1619,11 +1898,12 @@ overview of coordinate systems.
 
 [source,ngc]
 ----
-G64 <P- <Q->>
+G64 <P- <Q-> <R->>
 ----
 
 * 'P' - motion blending tolerance
 * 'Q' - naive cam tolerance
+* 'R' - trajectory planner selection and cornering aggressiveness (this fork only)
 * 'G64' - best possible speed. Without P (Or a default value in <<sub:ini:sec:rs274ngc,RS274NGC>>) means to keep the best speed
   possible, no matter how far away from the programmed point you end up.
 * 'G64 P-' - Blend between best speed and deviation tolerance
@@ -1651,7 +1931,53 @@ G64 <P- <Q->>
   and use the value of P-.
   Set Q to zero to disable the 'Naive CAM Detector'.
 
+=== G64 R: planner selection (((G64 R Planner)))
+
+The optional R word selects the trajectory planner and its cornering
+aggressiveness in one modal dial:
+
+* 'R omitted' - the planner is left exactly as it was (modal).
+* 'R0' (or negative) - trapezoidal planner: acceleration is bounded but can
+  step instantly (jerk is not limited).
+* 'R0.1 .. R1.0' - jerk-limited (S-curve) planner. The value sets the
+  cornering aggressiveness as the fraction of the jerk-feasible corner
+  speed that the look-ahead may use: 'R1.0' is full corner speed, lower
+  values corner more gently ('R0.5' matches the initial S-curve release).
+  Values outside 0.1..1.0 are clamped.
+
+The program only requests 'trapezoidal' or 'smooth'; which smooth planner
+implements the request is machine configuration
+(<<sub:ini:sec:traj,[TRAJ]SMOOTH_PLANNER>>), so part programs remain valid
+when the machine's planner implementation changes.
+
+[NOTE]
+====
+R0 to R0.1 is a regime flip, not the gentle end of a gradient: the
+trapezoidal planner is the jerk-unlimited, most aggressive setting, while
+R0.1 is the gentlest (jerk-limited and slowest through corners). Within
+R0.1..R1.0 the motion is equally smooth in the jerk sense; only the corner
+speed changes.
+====
+
+Behavior details:
+
+* A planner switch requested while queued motion remains is latched and
+  applied automatically once no queued motion is left; a message informs
+  the operator and motion is never aborted. The request persists until
+  applied or superseded. Set 'G64 ... R' in the program preamble, where
+  the switch is instant.
+* If the machine has no smooth planner available ('SMOOTH_PLANNER = 0' or
+  no usable jerk limit configured), 'R > 0' is refused with an operator
+  error instead of being silently ignored.
+* The R word cannot be used on a line that also contains 'M19' (the R
+  meanings would be ambiguous); this is an error.
+
 It is a good idea to include a path control specification in the preamble of each G-code file.
+
+It is an error if:
+
+* The path control mode is changed (G61, G61.1 or G64) while cutter
+  radius compensation is active.
 
 .G64 P- Q- Example Line
 [source,ngc]
@@ -1689,6 +2015,178 @@ G64 P0.015 Q2
 
 .G64 Heart
 image::images/G64_Heart_Q2.png["G64 Heart",align="center"]
+
+[[gcode:g68.2]]
+== G68.2, G68.4, G69 Tilted Work Plane(((G68.2 Tilted Work Plane)))
+
+[source,ngc]
+----
+G68.2 <P0> <Q-> X- Y- Z- I- J- K- <R->   (three angles, Euler)
+G68.2 P1 <Q-> X- Y- Z- I- J- K- <R->     (three angles about fixed axes)
+G68.2 P2 Q0 X- Y- Z- <R->                (three points: a shift of the origin, then)
+G68.2 P2 Q1 X- Y- Z- <R->                (a first point,)
+G68.2 P2 Q2 X- Y- Z- <R->                (a second point on the plane's +X,)
+G68.2 P2 Q3 X- Y- Z- <R->                (a third point on its +Y side; R on one block)
+G68.2 P3 Q1 X- Y- Z- I- J- K- <R->       (two vectors: the origin and +X, then)
+G68.2 P3 Q2 I- J- K-                     (+Z, the normal)
+G68.4 ...                                (any G68.2 form, on the active plane)
+G69                                      (cancel)
+----
+
+A tilted work plane is a coordinate system composed on top of the active one:
+the blocks between the definition and 'G69' are programmed in the plane, with
+X and Y in it and Z along its normal, while the work offset underneath, 'G54'
+say, is untouched. Positions on the display, probe results and
+<<gcode:g53,G53>> all take the plane into account. It is the same offset
+chain as always with one more stage, applied first:
+
+----
+absolute = tool offset + G5x + XY rotation applied to (G92 + origin + rotation applied to (G52 in the plane + program))
+----
+
+.'G68.2 X50 Y30 Z40 J30': a plane tilted 30 degrees about X, on G54, on the machine coordinates
+image::images/g68-2-plane.svg["G68.2 tilted work plane",align="center"]
+
+'X', 'Y' and 'Z' are the plane's origin ('P2' gives it by points, below) and
+the plane's rotation is built from the rest of the words, both in the
+coordinate system that is active when the plane is defined: the work offset
+with 'G92' and the XY rotation in place, which is what the position display
+shows at that moment. A rotary word does not pass through the plane, since
+on a TCP kinematics the rotary coordinates are the rotary joints and a plane
+does not change what a joint is. Words left out are zero.
+
+'P' selects how the rotation is given:
+
+* 'P0', or no 'P': three angles 'I', 'J', 'K' applied one after another,
+  each about an axis of the plane as rotated so far (Euler angles). 'Q'
+  names the axes with three digits, 1 for X, 2 for Y and 3 for Z, no two
+  adjacent alike; the default is 'Q313', Z then X then Z.
+* 'P1': three angles 'I', 'J', 'K', each about an axis of the coordinate
+  system the plane is defined in, in the order 'Q' gives; the default is
+  'Q123', X then Y then Z.
+* 'P2': three points, over up to four blocks with 'Q0' to 'Q3'. The
+  direction from the first point to the second is the plane's +X, the third
+  point lies on the +Y side. The origin is the first point. The 'Q0' block,
+  which may be left out, moves the origin by its 'X', 'Y', 'Z' along the
+  plane's own axes, after 'R': 'Q0 X10' puts the origin 10 along the plane's
+  X from the first point, the way 'X10' in a program under the plane would.
+  'R' may be given on any one of the blocks.
+* 'P3': two vectors, over two blocks. 'Q1' gives the origin and the +X
+  direction in 'I', 'J', 'K'; 'Q2' gives +Z, the normal, in 'I', 'J', 'K'.
+  The X direction is kept as given. The normal need not be exactly at right
+  angles to it, within 5 degrees; the part of the normal along X is dropped.
+
+'R' turns the plane about its own Z after everything else, in degrees.
+
+The forms follow the Fanuc tilted working plane commands, with a few
+extensions: 'R' on 'P0', 'P1' and 'P3' (Fanuc gives it with 'P2' only),
+'Q' on 'P0' (Fanuc's Euler angles are always Z, X, Z), 'P1' orders that
+repeat an axis, such as 'Q121', besides the six that name each axis once,
+and all three angles zero, which is the plane of the coordinate system
+underneath rather than an error, as on a Fanuc with parameter ATW set.
+
+The blocks of a 'P2' or 'P3' definition have to follow one another; any
+other block in between is an error. A definition left unfinished in MDI is
+dropped when a program is opened. A definition with a plane already active
+replaces it, with the words in the coordinate system underneath, not in the
+old plane.
+
+'G68.4' takes any 'G68.2' form and composes it onto the active plane: the
+words are in the plane, and the result is a new plane relative to the old
+one. It needs a plane to build on.
+
+The G-code preview draws every plane a program defines, so a program can
+be checked for where its planes sit before it runs: a rectangle lying in
+the plane, over the moves made under it with a margin around them, the
+plane's own X, Y and Z at the centre of the rectangle in the colours of
+the machine axes, and a cross at the plane's origin, which need not lie
+in the rectangle: a program drilling a sphere puts every plane's origin
+at the centre and works out on the surface. The rectangle is drawn at the plane's Z where the program comes
+down to it, and otherwise at the end of the Z range the program worked
+in that is nearest to it, so a drilling cycle that stays above the
+origin shows its holes where they are cut; a plane nothing moved under
+is drawn as a square sized from the program. A plane restated with the
+same words is one plane, not one per restatement. The plane in effect
+on the machine, the one the last executed 'G68.2' set, is drawn over
+the others in its own colour, so as the program runs the plane it is
+in stands out from the ones it has been in and will be in; a plane set
+from MDI shows the same way, as a square with nothing under it. The plane
+in effect is drawn no smaller than the coordinate system axes, with its
+own axes as long as those, so its orientation can be checked against them
+before a program runs, however small the program.
+
+'G69' cancels the plane. So do the end of the program, 'M2' or 'M30', and
+an abort, unless the INI setting `[RS274NGC]RETAIN_WORK_PLANE = 1` keeps it
+through both. A plane set up in MDI then serves every run of a program that
+does not set one itself. With the setting on:
+
+* After an abort the plane is the one the machine was in when it stopped,
+  not one the interpreter had read further on. If the work offset under it
+  is not the one the interpreter returns to, the plane is cancelled.
+* At the end of a program the plane stays where it is in the coordinate
+  system, and the coordinate system changes under it as the end of a
+  program changes it: to 'G54' unless `DISABLE_AUTO_G54 = 1`, and without
+  'G92' if `DISABLE_G92_PERSISTENCE = 1`.
+* An `ON_ABORT_COMMAND` runs inside the plane; a change of coordinate
+  system there takes the plane along, as below.
+
+Nothing about the plane is written to the parameter file, so a restart
+always cancels it.
+
+Defining the plane does not move anything.
+
+While a plane is active the codes that change the coordinate system the
+plane sits on are refused: 'G92', 'G92.1', 'G92.2', 'G92.3', 'G10 L2',
+'G10 L20', 'G10 L10' and 'G10 L11'. Cancel the plane first.
+
+A change of coordinate system ('G54' to 'G59.3') in a plane takes the plane
+along: its origin and rotation stay the same relative to the coordinate
+system, so the plane moves with the work offset and turns with its XY
+rotation, as on Fanuc with parameter 3TW set. The same tilted feature on
+several fixtures is one 'G68.2' and a 'G55', 'G56', ... before each.
+
+'G52' in a plane takes 'X', 'Y' and 'Z' only, and shifts the plane along
+its own axes, as Fanuc's local coordinate system does in a tilted working
+plane: 'G52 X10' moves the program's zero 10 along the plane's X. It is not
+written to the 'G92' parameters; 'G52 X0 Y0 Z0' takes it out, and 'G69'
+drops it. A 'G52' given before the plane stays in 'G92', under the plane. A
+new plane, by 'G68.2' or 'G68.4', is refused while a 'G52' in the plane is
+in effect, as on Fanuc.
+
+The active plane is reported in the modal G-code display as the code that
+defined it. Status carries it as `g68_offset`, `g68_rotation` and
+`g68_active`, next to the other offsets, for displays that want to show
+plane coordinates or draw the plane.
+
+.G68.2 Example
+[source,ngc]
+----
+G54
+G68.2 X50 Y50 Z0 I30 J20 K0     (Euler: 30 about Z, 20 about the new X)
+G0 X0 Y0 Z5                      (5 above the plane's origin, along its normal)
+G1 Z-3 F150                      (a hole 3 deep, straight into the plane)
+G0 Z5
+G68.4 X20 P1 I0 J0 K90           (a plane 20 along X in the old one, turned 90 about Z)
+G0 X0 Y0 Z5
+G69                              (back to G54 as it was)
+----
+
+It is an error if:
+
+* 'P' is not 0, 1, 2 or 3, or 'Q' with 'P0' or 'P1' is not three axis digits
+  with no two adjacent alike.
+* A 'P2' or 'P3' definition is interrupted, or its 'Q' words come out of
+  order.
+* The points of a 'P2' definition coincide or lie on one line, or a vector of
+  a 'P3' definition is zero or the two are 5 degrees or more off square.
+* A word the form does not read is given: 'I', 'J' or 'K' with 'P2', 'X',
+  'Y', 'Z' or 'R' on the 'P3' 'Q2' block, or 'A', 'B', 'C', 'U', 'V' or 'W'
+  with any form.
+* 'R' is given on more than one block of a 'P2' definition.
+* 'G68.4' is used with no plane active.
+* 'G68.2' or 'G68.4' is used while a 'G52' given in the plane is in effect.
+* Cutter compensation is on.
+* Polar coordinates or a motion code are used on the same line.
 
 [[gcode:g70]]
 == G70 Lathe finishing cycle(((G70 Lathe finishing cycle)))
@@ -1876,7 +2374,7 @@ In example S100 with 1.25MM per revolution thread pitch gives a feed of F125.
 
 [source,ngc]
 ----
-G76 P- Z- I- J- R- K- Q- H- E- L- $-
+G76 P- Z- I- J- R- K- Q- H- E- L- $- D-
 ----
 
 .G76 Threading
@@ -1917,6 +2415,20 @@ Unnecessarily high degression values will produce an unnecessarily high number o
 * 'H-' - The number of 'spring passes'.
   Spring passes are additional passes at full thread depth.
   If no additional passes are desired, program 'H0'.
+* 'D-' - The 'start angle offset' in degrees from the spindle index pulse.
+  Every pass of the cycle begins once the spindle has turned 'D' degrees past
+  the index pulse, instead of at the index pulse itself.
+  If 'D' is omitted the default is zero, which starts every pass at the index
+  pulse as before.
+  This cuts one start of a multi-start thread: run the same 'G76' cycle once per
+  start, each with a different 'D'. A two-start thread is cut with 'D0' and then
+  'D180', a three-start thread with 'D0', 'D120' and 'D240'.
+
+[NOTE]
+'D' is an angle past the index pulse and so is only meaningful as a positive
+number. A negative value is not an error: its magnitude is used, so 'D-90'
+behaves exactly as 'D90'. Values of 360 or more are not reduced, so 'D450'
+waits a full turn longer than 'D90'.
 
 Thread entries and exits can be programmed tapered with the 'E' and 'L' values.
 
@@ -1962,6 +2474,17 @@ It is an error if:
 * All the required words are not specified.
 * 'P-', 'J-', 'K-' or 'H-' is negative.
 * 'E-' is greater than half the drive line length.
+* The pitch and the spindle speed together ask an axis to move faster than
+  its maximum velocity. See <<gcode:g33,G33>> for how the speed is determined
+  in constant surface speed mode.
+
+[NOTE]
+The spindle speed override is held for the whole G76 cycle at the value in
+effect when the cycle starts, capped at 100% because the pitch is checked
+against the programmed speed. Moving it while the cycle runs has no effect, so
+every pass cuts at one speed and they stay on the same helix. The previous
+setting is restored when the cycle ends. To thread at 80% of the programmed
+speed, set the override before the cycle starts.
 
 .HAL Connections
 The pins 'spindle.N.at-speed' and the 'encoder._n_.phase-Z' for the
@@ -2696,7 +3219,8 @@ G96 <D-> S- <$-> (Constant Surface Speed Mode)
 G97 S- <$-> (RPM Mode)
 ----
 
-. 'D' - maximum rotation speed (RPM), optional
+. 'D' - maximum rotation speed (RPM), optional. Without D the spindle
+  speed in CSS mode is not limited by the interpreter.
 . 'S' - spindle speed
 . '$' - the spindle of which the speed will be varied, optional.
 
@@ -2723,7 +3247,6 @@ G96 D2500 S250 (set CSS with a max rpm of 2500 and a surface speed of 250)
 It is an error if:
 
 * S is not specified with G96
-* A feed move is specified in G96 mode while the spindle is not turning
 
 [[gcode:g98-g99]]
 == G98, G99 Canned Cycle Return Level(((G98, G99 Canned Cycle Return)))

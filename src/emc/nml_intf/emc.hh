@@ -19,7 +19,7 @@
 #include "libnml/nml/nml_type.hh"
 #include "motion_types.h"
 #include <stdint.h>
-#include "rs274ngc/modal_state.hh"
+#include "modal_state.hh"
 
 // Forward class declarations
 class EMC_JOINT_STAT;
@@ -91,9 +91,6 @@ struct PM_CARTESIAN;
 #define EMC_TRAJ_SET_SCALE_TYPE                      ((NMLTYPE) 209)
 #define EMC_TRAJ_SET_RAPID_SCALE_TYPE                ((NMLTYPE) 238)
 
-#define EMC_TRAJ_ABORT_TYPE                          ((NMLTYPE) 215)
-#define EMC_TRAJ_PAUSE_TYPE                          ((NMLTYPE) 216)
-#define EMC_TRAJ_RESUME_TYPE                         ((NMLTYPE) 218)
 #define EMC_TRAJ_DELAY_TYPE                          ((NMLTYPE) 219)
 #define EMC_TRAJ_LINEAR_MOVE_TYPE                    ((NMLTYPE) 220)
 #define EMC_TRAJ_CIRCULAR_MOVE_TYPE                  ((NMLTYPE) 221)
@@ -111,7 +108,9 @@ struct PM_CARTESIAN;
 #define EMC_TRAJ_SET_SO_ENABLE_TYPE                  ((NMLTYPE) 235)
 #define EMC_TRAJ_SET_FH_ENABLE_TYPE                  ((NMLTYPE) 236)
 #define EMC_TRAJ_RIGID_TAP_TYPE                      ((NMLTYPE) 237)
+#define EMC_TRAJ_SET_G68_TYPE                        ((NMLTYPE) 239)
 
+#define EMC_TRAJ_SELECT_KINS_TYPE             ((NMLTYPE) 289)
 #define EMC_TRAJ_STAT_TYPE                           ((NMLTYPE) 299)
 
 // EMC_MOTION aggregate class type declaration
@@ -147,11 +146,9 @@ struct PM_CARTESIAN;
 
 // EMC_TOOL type declarations
 
-#define EMC_TOOL_HALT_TYPE                           ((NMLTYPE) 1102)
 #define EMC_TOOL_ABORT_TYPE                          ((NMLTYPE) 1103)
 #define EMC_TOOL_PREPARE_TYPE                        ((NMLTYPE) 1104)
 #define EMC_TOOL_LOAD_TYPE                           ((NMLTYPE) 1105)
-#define EMC_TOOL_UNLOAD_TYPE                         ((NMLTYPE) 1106)
 #define EMC_TOOL_LOAD_TOOL_TABLE_TYPE                ((NMLTYPE) 1107)
 #define EMC_TOOL_SET_OFFSET_TYPE                     ((NMLTYPE) 1108)
 #define EMC_TOOL_SET_NUMBER_TYPE                     ((NMLTYPE) 1109)
@@ -214,7 +211,9 @@ enum class EMC_TASK_EXEC {
     WAITING_FOR_MOTION_AND_IO = 7,
     WAITING_FOR_DELAY = 8,
     WAITING_FOR_SYSTEM_CMD = 9,
-    WAITING_FOR_SPINDLE_ORIENTED = 10
+    WAITING_FOR_SPINDLE_ORIENTED = 10,
+    WAITING_FOR_KINS_SWITCH = 11,
+    WAITING_FOR_HOMING = 12
 };
 
 // types for EMC_TASK interpState
@@ -271,6 +270,8 @@ extern char **Argv;
 
 // print an error
 extern int emcOperatorError(const char *fmt, ...) __attribute__((format(printf,1,2)));
+/* as emcOperatorError(), but does not echo to the console */
+extern int emcOperatorErrorNoEcho(const char *fmt, ...) __attribute__((format(printf,1,2)));
 
 // print general text
 extern int emcOperatorText(const char *fmt, ...) __attribute__((format(printf,1,2)));
@@ -305,6 +306,7 @@ extern int emcJointSetFerror(int joint, double ferror);
 extern int emcJointSetMinFerror(int joint, double ferror);
 extern int emcJointSetHomingParams(int joint, double home, double offset, double home_vel,
 				  double search_vel, double latch_vel,
+				  double search_dist, double latch_dist,
 				  int use_index, int encoder_does_not_reset, int ignore_limits,
 				  int is_shared, int home_sequence, int volatile_home, int locking_indexer,
                   int absolute_encoder);
@@ -334,6 +336,7 @@ extern int emcJointSetMaxJerk(int joint, double jerk);
 
 extern int emcSpindleSetParams(int spindle, double max_pos, double min_pos, double max_neg,
             double min_neg, double search_vel, double home_angle, int sequence, double increment);
+extern double emcSpindleGetMaxVelocity(int spindle);
 
 // implementation functions for EMC_TRAJ types
 
@@ -370,16 +373,19 @@ extern int emcTrajStep();
 extern int emcTrajResume();
 extern int emcTrajDelay(double delay);
 extern int emcTrajLinearMove(const EmcPose& end, int type, double vel,
-                             double ini_maxvel, double acc, double ini_maxjerk, int indexer_jnum);
+                             double ini_maxvel, double acc, double ini_maxjerk,
+                             double vlimit_scale, int indexer_jnum);
 extern int emcTrajCircularMove(const EmcPose& end, const PM_CARTESIAN& center, const PM_CARTESIAN&
-        normal, int turn, int type, double vel, double ini_maxvel, double acc, double ini_maxjerk);
+        normal, int turn, int type, double vel, double ini_maxvel, double acc, double ini_maxjerk,
+        double vlimit_scale);
 extern int emcTrajSetTermCond(int cond, double tolerance);
-extern int emcTrajSetSpindleSync(int spindle, double feed_per_revolution, bool wait_for_index);
+extern int emcTrajSetSpindleSync(int spindle, double feed_per_revolution, bool wait_for_index, double angular_offset_degrees = 0.0);
 extern int emcTrajSetOffset(const EmcPose& tool_offset);
 extern int emcTrajSetHome(const EmcPose& home);
 extern int emcTrajClearProbeTrippedFlag();
 extern int emcTrajProbe(const EmcPose& pos, int type, double vel,
-                        double ini_maxvel, double acc, double ini_maxjerk, unsigned char probe_type);
+                        double ini_maxvel, double acc, double ini_maxjerk,
+                        double vlimit_scale, unsigned char probe_type);
 extern int emcTrajRigidTap(const EmcPose& pos, double vel, double ini_maxvel, double acc, double ini_maxjerk, double scale);
 
 extern int emcTrajUpdate(EMC_TRAJ_STAT * stat);
@@ -387,6 +393,10 @@ extern int emcTrajUpdate(EMC_TRAJ_STAT * stat);
 extern int emcTrajSetJerk(double jerk);
 extern int emcTrajSetMaxJerk(double jerk);
 extern int emcTrajPlannerType(int type);
+extern int emcTrajSetScurvePeakScale(double scale);
+/* G64_R_PLANNER: [TRAJ]SMOOTH_PLANNER - planner a G64 R>0 request resolves to */
+extern int emcTrajSetSmoothPlanner(int type);
+extern int emcTrajGetSmoothPlanner(void);
 // implementation functions for EMC_MOTION aggregate types
 
 extern int emcMotionInit();
@@ -406,7 +416,6 @@ extern int emcAbortCleanup(EMC_ABORT reason,const char *message = "");
 
 extern int emcToolPrepare(int tool);
 extern int emcToolLoad();
-extern int emcToolUnload();
 extern int emcToolLoadToolTable(const char *file);
 extern int emcToolSetOffset(int pocket, int toolno, const EmcPose& offset, double diameter,
                             double frontangle, double backangle, int orientation);
@@ -423,7 +432,7 @@ extern int emcSpindleAbort(int spindle);
 extern int emcSpindleSpeed(int spindle, double speed, double factor, double xoffset);
 extern int emcSpindleOn(int spindle, double speed, double factor, double xoffset,int wait_for_atspeed = 1);
 extern int emcSpindleOrient(int spindle, double orientation, int direction);
-extern int emcSpindleOff(int spindle);
+extern int emcSpindleOff(int spindle, int wait_for_atspeed = 0);
 extern int emcSpindleIncrease(int spindle);
 extern int emcSpindleDecrease(int spindle);
 extern int emcSpindleConstant(int spindle);
@@ -456,6 +465,7 @@ int emcSetupArcBlends(int arcBlendEnable,
 int emcSetProbeErrorInhibit(int j_inhibit, int h_inhibit);
 int emcGetExternalOffsetApplied(void);
 EmcPose emcGetExternalOffsets(void);
+extern int emcSelectKinsType(int switchkins_type);
 
 extern int emcUpdate(EMC_STAT * stat);
 // full EMC status

@@ -16,17 +16,19 @@
 
 #include <rtapi_math.h>
 #include <rtapi_app.h>
+#include <rtapi_string.h>
 #include <hal.h>
 #include <kinematics.h>
 
 #include "lineardeltakins-common.h"
 
-struct haldata
+static struct haldata
 {
-    hal_float_t *r, *l;
+    hal_real_t r;
+    hal_real_t l;
 } *haldata;
 
-int comp_id;
+static int comp_id;
 
 int kinematicsForward(const double * joints,
                       EmcPose * pos,
@@ -34,7 +36,7 @@ int kinematicsForward(const double * joints,
                       KINEMATICS_INVERSE_FLAGS * iflags) {
     (void)fflags;
     (void)iflags;
-    set_geometry(*haldata->r, *haldata->l);
+    set_geometry(hal_get_real(haldata->r), hal_get_real(haldata->l));
     return kinematics_forward(joints, pos);
 }
 
@@ -43,8 +45,32 @@ int kinematicsInverse(const EmcPose *pos, double *joints,
         KINEMATICS_FORWARD_FLAGS *fflags) {
     (void)iflags;
     (void)fflags;
-    set_geometry(*haldata->r, *haldata->l);
+    set_geometry(hal_get_real(haldata->r), hal_get_real(haldata->l));
     return kinematics_inverse(pos, joints);
+}
+
+int kinematicsJacobian(const double *joints,
+                       const EmcPose *pos,
+                       double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                       const KINEMATICS_INVERSE_FLAGS *iflags) {
+    double x = pos->tran.x, y = pos->tran.y, z = pos->tran.z;
+    int i, j;
+    (void)iflags;
+    set_geometry(hal_get_real(haldata->r), hal_get_real(haldata->l));
+    memset(jac, 0, EMCMOT_MAX_JOINTS * EMCMOT_MAX_AXIS * sizeof(jac[0][0]));
+    // each carriage is the platform height plus the rise of its rod, and
+    // the rise changes with the horizontal offset from the tower
+    for (i = 0; i < 3; i++) {
+        double tx = (i == 0) ? Ax : (i == 1) ? Bx : Cx;
+        double ty = (i == 0) ? Ay : (i == 1) ? By : Cy;
+        double rise = joints[i] - z;
+        if (rise <= 0) { return -1; }
+        jac[i][0] = (tx - x)/rise;
+        jac[i][1] = (ty - y)/rise;
+        jac[i][2] = 1;
+    }
+    for (j = 3; j < 9; j++) { jac[j][j] = 1; }
+    return 0;
 }
 
 KINEMATICS_TYPE kinematicsType()
@@ -54,35 +80,24 @@ KINEMATICS_TYPE kinematicsType()
 
 int rtapi_app_main(void)
 {
-    int retval = 0;
+    int retval;
 
     comp_id = hal_init("lineardeltakins");
-    if(comp_id < 0) retval = comp_id;
+    if(comp_id < 0) return comp_id;
 
-    if(retval == 0)
-    {
-        haldata = hal_malloc(sizeof(struct haldata));
-        retval = !haldata;
-    }
+    haldata = hal_malloc(sizeof(*haldata));
+    if(!haldata) { retval = -ENOMEM; goto error; }
 
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->r, comp_id,
-                "lineardeltakins.R");
-    if(retval == 0)
-        retval = hal_pin_float_newf(HAL_IN, &haldata->l, comp_id,
-                "lineardeltakins.L");
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->r, DELTA_RADIUS, "lineardeltakins.R")) < 0)
+        goto error;
+    if((retval = hal_pin_new_real(comp_id, HAL_IN, &haldata->l, DELTA_DIAGONAL_ROD, "lineardeltakins.L")) < 0)
+        goto error;
 
-    if(retval == 0)
-    {
-        *haldata->r = DELTA_RADIUS;
-        *haldata->l = DELTA_DIAGONAL_ROD;
-    }
+    hal_ready(comp_id);
+    return 0;
 
-    if(retval == 0)
-    {
-        hal_ready(comp_id);
-    }
-
+error:
+    hal_exit(comp_id);
     return retval;
 }
 
@@ -95,4 +110,5 @@ KINS_NOT_SWITCHABLE
 EXPORT_SYMBOL(kinematicsType);
 EXPORT_SYMBOL(kinematicsForward);
 EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsJacobian);
 MODULE_LICENSE("GPL");

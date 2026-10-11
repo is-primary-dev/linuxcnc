@@ -125,16 +125,16 @@ def do_tool_change_handshake(tool_number, pocket_number):
 
 h = hal.component("python-ui")
 
-h.newpin("tool-number", hal.HAL_S32, hal.HAL_IN)
-h.newpin("tool-prep-number", hal.HAL_S32, hal.HAL_IN)
-h.newpin("tool-prep-pocket", hal.HAL_S32, hal.HAL_IN)
-h.newpin("tool-from-pocket", hal.HAL_S32, hal.HAL_IN)
+h.newpin("tool-number", hal.Type.SINT, hal.Dir.IN)
+h.newpin("tool-prep-number", hal.Type.SINT, hal.Dir.IN)
+h.newpin("tool-prep-pocket", hal.Type.SINT, hal.Dir.IN)
+h.newpin("tool-from-pocket", hal.Type.SINT, hal.Dir.IN)
 
-h.newpin("tool-prepare", hal.HAL_BIT, hal.HAL_IN)
-h.newpin("tool-prepared", hal.HAL_BIT, hal.HAL_OUT)
+h.newpin("tool-prepare", hal.Type.BOOL, hal.Dir.IN)
+h.newpin("tool-prepared", hal.Type.BOOL, hal.Dir.OUT)
 
-h.newpin("tool-change", hal.HAL_BIT, hal.HAL_IN)
-h.newpin("tool-changed", hal.HAL_BIT, hal.HAL_OUT)
+h.newpin("tool-change", hal.Type.BOOL, hal.Dir.IN)
+h.newpin("tool-changed", hal.Type.BOOL, hal.Dir.OUT)
 
 h.ready() # mark the component as 'ready'
 
@@ -175,11 +175,9 @@ do_tool_change_handshake(tool_number=1, pocket_number=1)
 print("*** tool change complete")
 verify_tool_number(1)
 
-# M6 changes the loaded tool but does not by itself apply its offset
-# to motion, so #5401-#5409 (applied tool length offset) stay at 0.
 verify_interp_param(5401, 0)      # tlo x
 verify_interp_param(5402, 0)      # tlo y
-verify_interp_param(5403, 0)      # tlo z (not applied yet)
+verify_interp_param(5403, 1)      # tlo z
 verify_interp_param(5404, 0)      # tlo a
 verify_interp_param(5405, 0)      # tlo b
 verify_interp_param(5406, 0)      # tlo c
@@ -203,9 +201,6 @@ verify_interp_param(5428, 0)      # current w
 
 c.mdi('g43')
 c.wait_complete()
-
-# After G43 the tool length offset is applied; #5403 now reflects it.
-verify_interp_param(5403, 1)      # tlo z (now applied)
 
 verify_interp_param(5420, 0)      # current x
 verify_interp_param(5421, 0)      # current y
@@ -244,12 +239,9 @@ verify_stable_pin_values(
 
 verify_tool_number(10)
 
-# M61 changes the loaded tool but does not by itself apply its offset
-# to motion. The previous offset from T1 (z=1) is still applied here,
-# until the next G43.
 verify_interp_param(5401, 0)      # tlo x
 verify_interp_param(5402, 0)      # tlo y
-verify_interp_param(5403, 1)      # tlo z (still T1's offset, not yet reapplied)
+verify_interp_param(5403, 3)      # tlo z
 verify_interp_param(5404, 0)      # tlo a
 verify_interp_param(5405, 0)      # tlo b
 verify_interp_param(5406, 0)      # tlo c
@@ -273,9 +265,6 @@ verify_interp_param(5428, 0)      # current w
 
 c.mdi('g43')
 c.wait_complete()
-
-# After G43 the new tool's offset is applied; #5403 now reflects T10.
-verify_interp_param(5403, 3)      # tlo z (now applied)
 
 verify_interp_param(5420, 0)      # current x
 verify_interp_param(5421, 0)      # current y

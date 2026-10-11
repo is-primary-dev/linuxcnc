@@ -19,13 +19,12 @@
 #include <rtapi_math.h>
 #include <rtapi_string.h>
 #include <hal.h>
-#include <kinematics.h>
 
-#include "switchkins.h"
+#include <switchkins.h>
 
-struct scara_data {
-    hal_float_t *d1, *d2, *d3, *d4, *d5, *d6;
-} *haldata = 0;
+static struct scara_data {
+    hal_real_t d1, d2, d3, d4, d5, d6;
+} *haldata = NULL;
 
 /* key dimensions
 
@@ -63,13 +62,6 @@ struct scara_data {
                 on the value of joint[3].
 */
 
-#define D1 (*(haldata->d1))
-#define D2 (*(haldata->d2))
-#define D3 (*(haldata->d3))
-#define D4 (*(haldata->d4))
-#define D5 (*(haldata->d5))
-#define D6 (*(haldata->d6))
-
 /* joint[0], joint[1] and joint[3] are in degrees and joint[2] is in length units */
 static
 int scaraKinematicsForward(const double * joint,
@@ -91,13 +83,21 @@ int scaraKinematicsForward(const double * joint,
     a1 = a1 + a0;
     a3 = a3 + a1;
 
+    rtapi_real D1 = hal_get_real(haldata->d1);
+    rtapi_real D2 = hal_get_real(haldata->d2);
+    rtapi_real D3 = hal_get_real(haldata->d3);
+    rtapi_real D4 = hal_get_real(haldata->d4);
+    rtapi_real D5 = hal_get_real(haldata->d5);
+    rtapi_real D6 = hal_get_real(haldata->d6);
+
     x = D2*cos(a0) + D4*cos(a1) + D6*cos(a3);
     y = D2*sin(a0) + D4*sin(a1) + D6*sin(a3);
     z = D1 + D3 - joint[2] - D5;
     c = a3;
 
+    // the elbow flag: which sign the inverse gives the acos of joint 1
     *iflags = 0;
-    if (joint[1] < 90)
+    if (joint[1] < 0)
         *iflags = 1;
 
     world->tran.x = x;
@@ -128,6 +128,13 @@ static int scaraKinematicsInverse(const EmcPose * world,
 
     /* convert degrees to radians */
     a3 = c * ( PM_PI / 180 );
+
+    rtapi_real D1 = hal_get_real(haldata->d1);
+    rtapi_real D2 = hal_get_real(haldata->d2);
+    rtapi_real D3 = hal_get_real(haldata->d3);
+    rtapi_real D4 = hal_get_real(haldata->d4);
+    rtapi_real D5 = hal_get_real(haldata->d5);
+    rtapi_real D6 = hal_get_real(haldata->d6);
 
     /* center of end effector (correct for D6) */
     xt = x - D6*cos(a3);
@@ -171,6 +178,56 @@ static int scaraKinematicsInverse(const EmcPose * world,
     return (0);
 } // scaraKinematicsInverse()
 
+static int scaraKinematicsJacobian(const double * joint,
+                                   const EmcPose * world,
+                                   double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                                   const KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    (void)iflags;
+    rtapi_real D2 = hal_get_real(haldata->d2);
+    rtapi_real D4 = hal_get_real(haldata->d4);
+    rtapi_real D6 = hal_get_real(haldata->d6);
+    const double a3 = world->c * (PM_PI / 180);
+    const double q1 = joint[1] * (PM_PI / 180);
+    const double xt = world->tran.x - D6*cos(a3);
+    const double yt = world->tran.y - D6*sin(a3);
+    const double rsq = xt*xt + yt*yt;
+    /* gradients over (x, y, c) of the quantities the inverse builds */
+    double d_xt[3] = { 1, 0,  D6*sin(a3) * (PM_PI/180) };
+    double d_yt[3] = { 0, 1, -D6*cos(a3) * (PM_PI/180) };
+    double d_q1[3], d_q0[3], dphi_dq1;
+    int i;
+
+    if (rsq <= 0 || fabs(sin(q1)) < 1e-12) {
+        /* the arm folded or straight out: the elbow rate is unbounded */
+        return -1;
+    }
+    memset(jac, 0, EMCMOT_MAX_JOINTS * EMCMOT_MAX_AXIS * sizeof(jac[0][0]));
+
+    /* rsq = D2^2 + D4^2 + 2 D2 D4 cos(q1), so q1 follows rsq; q0 is the
+       bearing of the end effector less the angle the outer arm subtends,
+       whose rate over q1 is (D2 D4 cos(q1) + D4^2) / rsq */
+    dphi_dq1 = (D2*D4*cos(q1) + D4*D4) / rsq;
+    for (i = 0; i < 3; i++) {
+        double d_rsq = 2*xt*d_xt[i] + 2*yt*d_yt[i];
+        d_q1[i] = -d_rsq / (2*D2*D4*sin(q1));
+        d_q0[i] = (xt*d_yt[i] - yt*d_xt[i]) / rsq - dphi_dq1 * d_q1[i];
+    }
+
+    /* columns x, y, c; the rest of the pose does not reach these joints */
+    for (i = 0; i < 3; i++) {
+        int col = (i == 2) ? 5 : i;
+        jac[0][col] = d_q0[i] * (180 / PM_PI);
+        jac[1][col] = d_q1[i] * (180 / PM_PI);
+        jac[3][col] = -(jac[0][col] + jac[1][col]);
+    }
+    jac[3][5] += 1;
+    jac[2][2] = -1;
+    jac[4][3] = 1;
+    jac[5][4] = 1;
+    return 0;
+} // scaraKinematicsJacobian()
+
 #define DEFAULT_D1 490
 #define DEFAULT_D2 340
 #define DEFAULT_D3  50
@@ -188,20 +245,13 @@ static int scaraKinematicsSetup(const  int   comp_id,
     haldata = hal_malloc(sizeof(*haldata));
     if (!haldata) goto error;
 
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d1), comp_id,"%s.D1",kp->halprefix);
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d2), comp_id,"%s.D2",kp->halprefix);
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d3), comp_id,"%s.D3",kp->halprefix);
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d4), comp_id,"%s.D4",kp->halprefix);
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d5), comp_id,"%s.D5",kp->halprefix);
-    res += hal_pin_float_newf(HAL_IN, &(haldata->d6), comp_id,"%s.D6",kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d1), DEFAULT_D1, "%s.D1", kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d2), DEFAULT_D2, "%s.D2", kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d3), DEFAULT_D3, "%s.D3", kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d4), DEFAULT_D4, "%s.D4", kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d5), DEFAULT_D5, "%s.D5", kp->halprefix);
+    res += hal_pin_new_real(comp_id, HAL_IN, &(haldata->d6), DEFAULT_D6, "%s.D6", kp->halprefix);
     if (res) { goto error; }
-
-    D1 = DEFAULT_D1;
-    D2 = DEFAULT_D2;
-    D3 = DEFAULT_D3;
-    D4 = DEFAULT_D4;
-    D5 = DEFAULT_D5;
-    D6 = DEFAULT_D6;
 
     return 0;
 
@@ -221,14 +271,31 @@ int switchkinsSetup(kparms* kp,
     kp->allow_duplicates     = 0;
     kp->max_joints = strlen(kp->required_coordinates);
 
-    rtapi_print("\n!!! switchkins-type 0 is %s\n",kp->kinsname);
-    *kset0 = scaraKinematicsSetup;
-    *kfwd0 = scaraKinematicsForward;
-    *kinv0 = scaraKinematicsInverse;
+    if (kp->sparm && strstr(kp->sparm,"identityfirst")) {
+        rtapi_print("\n!!! switchkins-type 0 is IDENTITY\n");
+        *kset0 = identityKinematicsSetup;
+        *kfwd0 = identityKinematicsForward;
+        *kinv0 = identityKinematicsInverse;
 
-    *kset1 = identityKinematicsSetup;
-    *kfwd1 = identityKinematicsForward;
-    *kinv1 = identityKinematicsInverse;
+        *kset1 = scaraKinematicsSetup;
+        *kfwd1 = scaraKinematicsForward;
+        *kinv1 = scaraKinematicsInverse;
+        switchkinsDeclare(0, KINSTYPE_IDENTITY);
+        switchkinsDeclare(1, KINSTYPE_PRIMARY);
+        switchkinsRegisterJacobian(1, scaraKinematicsJacobian);
+    } else {
+        rtapi_print("\n!!! switchkins-type 0 is %s\n",kp->kinsname);
+        *kset0 = scaraKinematicsSetup;
+        *kfwd0 = scaraKinematicsForward;
+        *kinv0 = scaraKinematicsInverse;
+        switchkinsRegisterJacobian(0, scaraKinematicsJacobian);
+
+        *kset1 = identityKinematicsSetup;
+        *kfwd1 = identityKinematicsForward;
+        *kinv1 = identityKinematicsInverse;
+        switchkinsDeclare(0, KINSTYPE_PRIMARY);
+        switchkinsDeclare(1, KINSTYPE_IDENTITY);
+    }
 
     *kset2 = userkKinematicsSetup;
     *kfwd2 = userkKinematicsForward;

@@ -53,35 +53,36 @@ change all instances of `userkins` to `mykins`.
 * The *fpin* pin is included to satisfy the requirements of the halcompile
   utility but it is not accessible to kinematics functions.
 * HAL pins and parameters needed in kinematics functions (kinematicsForward(),
-  kinematicsInverse()) must be setup in a function (*userkins_setup()*) invoked
-  by the initial motion module call to kinematicsType().
+  kinematicsInverse()) must be setup in the *EXTRA_SETUP()* function, which
+  halcompile runs once when the module is loaded, before the component is
+  made ready.
 
 """;
 // The fpin pin is not accessible in kinematics functions.
-// Use the *_setup() function for pins and params used by kinematics.
-pin out s32 fpin=0"pin to demonstrate use of a conventional (non-kinematics) function fdemo";
+// Use EXTRA_SETUP() for pins and params used by kinematics.
+pin out sint fpin=0"pin to demonstrate use of a conventional (non-kinematics) function fdemo";
 option period no;
+option extra_setup;
 function fdemo;
 license "GPL";
 author "Dewey Garrett";
 ;;
 
-#include <rtapi_math.h>
 #include <kinematics.h>
 
 static struct haldata {
   // Example pin pointers
-  hal_u32_t *in;
-  hal_u32_t *out;
+  hal_uint_t in;
+  hal_uint_t out;
   // Example parameters
-  hal_float_t param_rw;
-  hal_float_t param_ro;
+  hal_real_t param_rw;
+  hal_real_t param_ro;
 } *haldata;
 // hal pin/param types:
-// hal_bit_t   bit
-// hal_u32_t   unsigned 32bit integer
-// hal_s32_t   signed 32bit integer
-// hal_float_t float (double precision)
+// hal_bool_t boolean bit
+// hal_uint_t unsigned integer
+// hal_sint_t signed integer
+// hal_real_t floating point (double precision)
 
 FUNCTION(fdemo) {
    // This function can be added to a thread (addf) for
@@ -89,31 +90,31 @@ FUNCTION(fdemo) {
    if (fpin == 0) {
        rtapi_print("fdemo function added to thread\n");
    }
-   fpin++;
+   fpin_set(fpin + 1);
 }
 
-static int userkins_setup(void) {
+EXTRA_SETUP() {
+    (void)__comp_inst;
+    (void)prefix;
+    (void)extra_arg;
 #define HAL_PREFIX "userkins"
     int res=0;
 
     // inherit comp_id from rtapi_main()
     if (comp_id < 0) goto error;
-    // set unready to allow creation of pins
-    if (hal_set_unready(comp_id)) goto error;
 
     haldata = hal_malloc(sizeof(struct haldata));
     if (!haldata) goto error;
 
     // hal pin examples:
-    res += hal_pin_u32_newf(HAL_IN ,&(haldata->in) ,comp_id,"%s.in" ,HAL_PREFIX);
-    res += hal_pin_u32_newf(HAL_OUT,&(haldata->out),comp_id,"%s.out",HAL_PREFIX);
+    res += hal_pin_new_uint(comp_id, HAL_IN , &(haldata->in) , 0, "%s.in" , HAL_PREFIX);
+    res += hal_pin_new_uint(comp_id, HAL_OUT, &(haldata->out), 0, "%s.out", HAL_PREFIX);
 
     // hal parameter examples:
-    res += hal_param_float_newf(HAL_RW, &haldata->param_rw,comp_id,"%s.param-rw",HAL_PREFIX);
-    res += hal_param_float_newf(HAL_RO, &haldata->param_ro,comp_id,"%s.param-ro",HAL_PREFIX);
+    res += hal_param_new_real(comp_id, HAL_RW, &haldata->param_rw, 0.0, "%s.param-rw", HAL_PREFIX);
+    res += hal_param_new_real(comp_id, HAL_RO, &haldata->param_ro, 0.0, "%s.param-ro", HAL_PREFIX);
 
     if (res) goto error;
-    hal_ready(comp_id);
     rtapi_print("*** %s setup ok\n",__FILE__);
     return 0;
 error:
@@ -127,12 +128,11 @@ KINS_NOT_SWITCHABLE
 
 EXPORT_SYMBOL(kinematicsType);
 EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsJacobian);
 EXPORT_SYMBOL(kinematicsForward);
 
 KINEMATICS_TYPE kinematicsType()
 {
-static bool is_setup=0;
-    if (!is_setup) userkins_setup();
     return KINEMATICS_IDENTITY; // set as required
            // Note: If kinematics are identity, using KINEMATICS_BOTH
            //       may be used in order to allow a gui to display
@@ -160,7 +160,7 @@ int kinematicsForward(const double *j,
     pos->v = 0;
     pos->w = 0;
 
-    if (*haldata->in && !is_ready && !gave_msg) {
+    if (hal_get_uint(haldata->in) && !is_ready && !gave_msg) {
        rtapi_print_msg(RTAPI_MSG_ERR,
                        "%s The 'in' pin not echoed until Inverse called\n",
                       __FILE__);
@@ -190,8 +190,29 @@ int kinematicsInverse(const EmcPose * pos,
     j[2] = pos->tran.z; // joint 2
 
     //example hal pin update (homing reqd before kinematicsInverse)
-    *haldata->out = *haldata->in; //dereference
-    //read from param example: *haldata->out = haldata->param_rw;
+    hal_set_uint(haldata->out, hal_get_uint(haldata->in)); //dereference
+    //read from param example: hal_set_uint(haldata->out, hal_get_real(haldata->param_rw));
 
     return 0;
 } // kinematicsInverse()
+
+int kinematicsJacobian(const double *j,
+                       const EmcPose * pos,
+                       double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                       const KINEMATICS_INVERSE_FLAGS * iflags)
+{
+    int r, c;
+    (void)j;
+    (void)pos;
+    (void)iflags;
+    // How each joint responds to each pose coordinate, the derivative of
+    // kinematicsInverse(): for this template joint 0 follows x, joint 1
+    // follows y and joint 2 follows z, each one for one.  See kinematics.h.
+    for (r = 0; r < EMCMOT_MAX_JOINTS; r++) {
+        for (c = 0; c < EMCMOT_MAX_AXIS; c++) { jac[r][c] = 0; }
+    }
+    jac[0][0] = 1;
+    jac[1][1] = 1;
+    jac[2][2] = 1;
+    return 0;
+} // kinematicsJacobian()

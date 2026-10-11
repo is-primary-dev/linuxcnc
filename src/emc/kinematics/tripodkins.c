@@ -65,6 +65,7 @@
 #include <rtapi.h>		/* RTAPI realtime OS API */
 #include <rtapi_app.h>		/* RTAPI realtime module decls */
 #include <rtapi_math.h>
+#include <rtapi_string.h>
 #include <hal.h>
 #include <kinematics.h>             /* these decls */
 
@@ -75,13 +76,11 @@
 #endif
 #endif
 
-struct haldata {
-    hal_float_t *bx, *cx, *cy;
-} *haldata = 0;
-
-#define Bx (*(haldata->bx))
-#define Cx (*(haldata->cx))
-#define Cy (*(haldata->cy))
+static struct haldata {
+    hal_real_t bx;
+    hal_real_t cx;
+    hal_real_t cy;
+} *haldata = NULL;
 
 #define sq(x) ((x)*(x))
 
@@ -139,6 +138,9 @@ int kinematicsForward(const double * joints,
 #define Dz (pos->tran.z)
   double P, Q, R;
   double s, t, u;
+  rtapi_real Bx = hal_get_real(haldata->bx);
+  rtapi_real Cx = hal_get_real(haldata->cx);
+  rtapi_real Cy = hal_get_real(haldata->cy);
 
   P = sq(AD);
   Q = sq(BD) - sq(Bx);
@@ -194,6 +196,9 @@ int kinematicsInverse(const EmcPose * pos,
 #define Dx (pos->tran.x)
 #define Dy (pos->tran.y)
 #define Dz (pos->tran.z)
+  rtapi_real Bx = hal_get_real(haldata->bx);
+  rtapi_real Cx = hal_get_real(haldata->cx);
+  rtapi_real Cy = hal_get_real(haldata->cy);
 
   AD = sqrt(sq(Dx) + sq(Dy) + sq(Dz));
   BD = sqrt(sq(Dx - Bx) + sq(Dy) + sq(Dz));
@@ -212,6 +217,35 @@ int kinematicsInverse(const EmcPose * pos,
 #undef Dx
 #undef Dy
 #undef Dz
+}
+
+int kinematicsJacobian(const double * joints,
+                       const EmcPose * pos,
+                       double jac[EMCMOT_MAX_JOINTS][EMCMOT_MAX_AXIS],
+                       const KINEMATICS_INVERSE_FLAGS * iflags)
+{
+  rtapi_real Bx = hal_get_real(haldata->bx);
+  rtapi_real Cx = hal_get_real(haldata->cx);
+  rtapi_real Cy = hal_get_real(haldata->cy);
+  /* the three strut base points, in the order of the joints */
+  const double base[3][2] = { {0, 0}, {Bx, 0}, {Cx, Cy} };
+  int i;
+
+  (void)iflags;
+  memset(jac, 0, EMCMOT_MAX_JOINTS * EMCMOT_MAX_AXIS * sizeof(jac[0][0]));
+  /* a strut length changes by the component of the motion along the
+     strut, so each row is the unit vector from base to D */
+  for (i = 0; i < 3; i++) {
+    double dx = pos->tran.x - base[i][0];
+    double dy = pos->tran.y - base[i][1];
+    double dz = pos->tran.z;
+    double len = joints[i];
+    if (len <= 0) { return -1; }
+    jac[i][0] = dx/len;
+    jac[i][1] = dy/len;
+    jac[i][2] = dz/len;
+  }
+  return 0;
 }
 
 KINEMATICS_TYPE kinematicsType()
@@ -352,12 +386,13 @@ KINS_NOT_SWITCHABLE
 EXPORT_SYMBOL(kinematicsType);
 EXPORT_SYMBOL(kinematicsForward);
 EXPORT_SYMBOL(kinematicsInverse);
+EXPORT_SYMBOL(kinematicsJacobian);
 
 MODULE_LICENSE("GPL");
 
 
 
-int comp_id;
+static int comp_id;
 int rtapi_app_main(void) {
     int res = 0;
 
@@ -367,11 +402,10 @@ int rtapi_app_main(void) {
     haldata = hal_malloc(sizeof(struct haldata));
     if(!haldata) goto error;
 
-    if((res = hal_pin_float_new("tripodkins.Bx", HAL_IO, &(haldata->bx), comp_id)) < 0) goto error;
-    if((res = hal_pin_float_new("tripodkins.Cx", HAL_IO, &(haldata->cx), comp_id)) < 0) goto error;
-    if((res = hal_pin_float_new("tripodkins.Cy", HAL_IO, &(haldata->cy), comp_id)) < 0) goto error;
+    if((res = hal_pin_new_real(comp_id, HAL_IO, &(haldata->bx), 1.0, "tripodkins.Bx")) < 0) goto error;
+    if((res = hal_pin_new_real(comp_id, HAL_IO, &(haldata->cx), 1.0, "tripodkins.Cx")) < 0) goto error;
+    if((res = hal_pin_new_real(comp_id, HAL_IO, &(haldata->cy), 1.0, "tripodkins.Cy")) < 0) goto error;
 
-    Bx = Cx = Cy = 1.0;
     hal_ready(comp_id);
     return 0;
 

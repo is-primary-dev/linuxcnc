@@ -41,7 +41,6 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <rtapi_string.h>
 
 #define UNEXPECTED_MSG fprintf(stderr,"UNEXPECTED %s %d\n",__FILE__,__LINE__);
 
@@ -111,6 +110,19 @@ void print_nc_line_number()
 
 void SET_XY_ROTATION(double t) {
   ECHO_WITH_ARGS("%.4f", t);
+}
+
+void HOME_CYCLE(void) { ECHO_WITH_ARGS(""); }
+void HOME_CYCLE_JOINT(int joint) { ECHO_WITH_ARGS("%d", joint); }
+
+void SET_G68_FRAME(double x, double y, double z,
+                   const double rotation[9], int active) {
+  ECHO_WITH_ARGS("%.4f, %.4f, %.4f, "
+                 "[%.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f], %d",
+                 x, y, z,
+                 rotation[0], rotation[1], rotation[2],
+                 rotation[3], rotation[4], rotation[5],
+                 rotation[6], rotation[7], rotation[8], active);
 }
 
 void SET_G5X_OFFSET(int index,
@@ -253,8 +265,12 @@ void SET_FEED_REFERENCE(CANON_FEED_REFERENCE reference)
          (reference == CANON_WORKPIECE) ? "CANON_WORKPIECE" : "CANON_XYZ");
 }
 
-extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance)
+extern void SET_MOTION_CONTROL_MODE(CANON_MOTION_MODE mode, double tolerance,
+                                    int planner_type, double scurve_peak_scale)
 {
+  /* G64_R_PLANNER: standalone-interp echo of the optional planner mode */
+  if (planner_type >= 0 || scurve_peak_scale >= 0.0)
+    PRINT("SET_PLANNER_MODE(type=%d, peak_scale=%f)\n", planner_type, scurve_peak_scale);
   _sai.motion_tolerance = 0;
   if (mode == CANON_EXACT_STOP)
     {
@@ -485,7 +501,7 @@ void SET_SPINDLE_SPEED(int spindle, double rpm)
   _sai._spindle_speed[spindle] = rpm;
 }
 
-void STOP_SPINDLE_TURNING(int spindle)
+void STOP_SPINDLE_TURNING(int spindle, int /*wait_for_atspeed*/)
 {
   PRINT("STOP_SPINDLE_TURNING(%i)\n", spindle);
   _sai._spindle_turning[spindle] = CANON_STOPPED;
@@ -620,6 +636,9 @@ void ENABLE_FEED_OVERRIDE()
 void ENABLE_SPEED_OVERRIDE(int spindle)
 {PRINT("ENABLE_SPEED_OVERRIDE(%i)\n", spindle); so_enable = true; }
 
+void LOCK_SPEED_OVERRIDE(int spindle)
+{PRINT("LOCK_SPEED_OVERRIDE(%i)\n", spindle); }
+
 void FLOOD_OFF()
 {
   PRINT("FLOOD_OFF()\n");
@@ -730,12 +749,19 @@ double GET_EXTERNAL_MOTION_CONTROL_NAIVECAM_TOLERANCE()
                                         { return _sai.naivecam_tolerance; }
 double GET_EXTERNAL_LENGTH_UNITS() {return _sai._external_length_units;}
 int GET_EXTERNAL_FEED_HOLD_ENABLE() {return 1;}
-int GET_EXTERNAL_AXIS_MASK() {return 0x3f;} // XYZABC machine
+int GET_EXTERNAL_AXIS_MASK() {return _sai._axis_mask;}
 double GET_EXTERNAL_ANGLE_UNITS() {return 1.0;}
 int GET_EXTERNAL_SELECTED_TOOL_SLOT() { return 0; }
 int GET_EXTERNAL_SPINDLE_OVERRIDE_ENABLE(int /*spindle*/) {return so_enable;}
-void START_SPEED_FEED_SYNCH(int /*spindle*/, double sync, bool vel)
-{PRINT("START_SPEED_FEED_SYNC(%f,%d)\n", sync, vel);}
+void START_SPEED_FEED_SYNCH(int /*spindle*/, double sync, bool vel, double angle_degrees)
+{
+    // only print the angle when one was asked for, so that the expected output
+    // of tests predating the D word stays valid
+    if (angle_degrees != 0.0)
+        PRINT("START_SPEED_FEED_SYNC(%f,%d,%f)\n", sync, vel, angle_degrees);
+    else
+        PRINT("START_SPEED_FEED_SYNC(%f,%d)\n", sync, vel);
+}
 CANON_MOTION_MODE motion_mode;
 
 int GET_EXTERNAL_DIGITAL_INPUT(int /*index*/, int def) { return def; }
@@ -774,6 +800,22 @@ extern CANON_MOTION_MODE GET_EXTERNAL_MOTION_CONTROL_MODE()
   return _sai._motion_mode;
 }
 
+extern int GET_EXTERNAL_KINS_TYPE()
+{
+  return 0;
+}
+
+extern int GET_EXTERNAL_KINS_TYPE_FLAGS(int ktype)
+{
+  (void)ktype;
+  return -1;
+}
+
+extern int GET_EXTERNAL_G68_FRAME(double * /*origin*/, double * /*rotation*/)
+{
+  return -1;
+}
+
 extern void SET_PARAMETER_FILE_NAME(const char *name)
 {
   strncpy(_parameter_file_name, name, PARAMETER_FILE_NAME_LENGTH - 1);
@@ -784,7 +826,7 @@ void GET_EXTERNAL_PARAMETER_FILE_NAME(
  int max_size)           /* maximum number of characters to copy */
 {
     // Paranoid checks
-    if (0 == file_name)
+    if (NULL == file_name)
 	return;
 
     if (max_size < 0)
@@ -965,13 +1007,24 @@ extern CANON_TOOL_TABLE GET_EXTERNAL_TOOL_TABLE(int idx)
 #endif //}
 }
 
+/* The standalone interpreter has no machine, so no axis limits */
+double GET_EXTERNAL_AXIS_MAX_VELOCITY(int /*axis*/)
+{
+  return 0.0;
+}
+
+double GET_EXTERNAL_SPINDLE_MAX_VELOCITY(int /*spindle*/)
+{
+  return 0.0;
+}
+
 /* Returns the system traverse rate */
 double GET_EXTERNAL_TRAVERSE_RATE()
 {
   return _sai._traverse_rate;
 }
 
-USER_DEFINED_FUNCTION_TYPE USER_DEFINED_FUNCTION[USER_DEFINED_FUNCTION_NUM] = {0};
+USER_DEFINED_FUNCTION_TYPE USER_DEFINED_FUNCTION[USER_DEFINED_FUNCTION_NUM] = {NULL};
 
 int USER_DEFINED_FUNCTION_ADD(USER_DEFINED_FUNCTION_TYPE func, int num)
 {
@@ -1111,7 +1164,7 @@ void CANON_ERROR(const char *fmt, ...)
 	va_start(ap, fmt);
 	char *err;
 	int res = vasprintf(&err, fmt, ap);
-	if(res < 0) err = 0;
+	if(res < 0) err = NULL;
 	va_end(ap);
 	if(err)
 	{
@@ -1138,6 +1191,7 @@ StandaloneInterpInternals::StandaloneInterpInternals() :
   _feed_rate(0.0),
   _flood(0),
   _external_length_units(1.0),
+  _axis_mask(0x3f), /* XYZABC unless the INI names the axes */
   _length_unit_factor(1), /* 1 for MM 25.4 for inch */
   _length_unit_type(CANON_UNITS_MM),
   _line_number(1),
@@ -1187,4 +1241,9 @@ StandaloneInterpInternals::StandaloneInterpInternals() :
 }
 void UPDATE_TAG(const StateTag& /*tag*/){
     //Do nothing
+}
+
+void SELECT_KINS_TYPE(int switchkins_type)
+{
+    ECHO_WITH_ARGS("%d", switchkins_type);
 }

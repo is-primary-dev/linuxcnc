@@ -18,7 +18,6 @@
 #include <rtapi_math.h>
 #include <posemath.h>
 #include <emcpose.h>
-#include <motion_types.h>
 
 #include "blendmath.h"
 #include "tc.h"
@@ -64,19 +63,27 @@ double tcGetMaxTargetVel(TC_STRUCT const * const tc,
     return fmin(v_max_target, tc->maxvel);
 }
 
-double tcGetOverallMaxAccel(const TC_STRUCT *tc)
+static double tcOverallMaxAccelScaled(const TC_STRUCT *tc, int apply_parabolic)
 {
     // Handle any acceleration reduction due to an approximate-tangent "blend" with the previous or next segment
     double a_scale = (1.0 - fmax(tc->kink_accel_reduce, tc->kink_accel_reduce_prev));
 
     // Parabolic blending conditions: If the next segment or previous segment
     // has a parabolic blend with this one, acceleration is scaled down by 1/2
-    // so that the sum of the two does not exceed the maximum.
-    if (tc->blend_prev || TC_TERM_COND_PARABOLIC == tc->term_cond) {
+    // so that the sum of the two does not exceed the maximum. This is only
+    // physically required while both segments accelerate simultaneously in the
+    // blend overlap; callers that need the geometric corner limit pass
+    // apply_parabolic != 0, the per-cycle motion cap gates it on the overlap.
+    if (apply_parabolic && (tc->blend_prev || TC_TERM_COND_PARABOLIC == tc->term_cond)) {
         a_scale *= 0.5;
     }
 
     return tc->maxaccel * a_scale;
+}
+
+double tcGetOverallMaxAccel(const TC_STRUCT *tc)
+{
+    return tcOverallMaxAccelScaled(tc, 1);
 }
 
 /**
@@ -91,6 +98,25 @@ double tcGetTangentialMaxAccel(TC_STRUCT const * const tc)
     // moving along the circular path).
     if (tc->motion_type == TC_CIRCULAR || tc->motion_type == TC_SPHERICAL) {
         //Limit acceleration for circular arcs to allow for normal acceleration
+        a_scale *= tc->acc_ratio_tan;
+    }
+    return a_scale;
+}
+
+/**
+ * Per-cycle tangential acceleration limit.
+ *
+ * Same as tcGetTangentialMaxAccel, except the parabolic-blend 1/2 reduction is
+ * only applied when the segment shares its acceleration with a parabolic
+ * neighbor (in_overlap != 0): as the secondary of an active blend, or from the
+ * moment a parabolic successor is queued (see tcBlendsIntoNext in tp.c). A
+ * segment moving alone gets the full path acceleration.
+ */
+double tcGetCycleMaxAccel(TC_STRUCT const * const tc, int in_overlap)
+{
+    double a_scale = tcOverallMaxAccelScaled(tc, in_overlap);
+
+    if (tc->motion_type == TC_CIRCULAR || tc->motion_type == TC_SPHERICAL) {
         a_scale *= tc->acc_ratio_tan;
     }
     return a_scale;
@@ -720,6 +746,11 @@ int tcInit(TC_STRUCT * const tc,
     tc->ruckig_last_use_velocity_control = 0;
     tc->ruckig_last_req_pos = 0.0;
     tc->ruckig_last_feed_override = 0.0;
+    tc->ruckig_fail_logged_pool = 0;
+    tc->ruckig_fail_logged_vel_replan = 0;
+    tc->ruckig_fail_logged_vel_first = 0;
+    tc->ruckig_fail_logged_pos_replan = 0;
+    tc->ruckig_fail_logged_pos_first = 0;
 
     return TP_ERR_OK;
 }
@@ -758,6 +789,7 @@ int tcSetupState(TC_STRUCT * const tc, TP_STRUCT const * const tp)
     tc->tolerance = tp->tolerance;
     tc->synchronized = tp->synchronized;
     tc->uu_per_rev = tp->uu_per_rev;
+    tc->angle_offset = tp->spindle.pending_offset;
     return TP_ERR_OK;
 }
 
@@ -1034,15 +1066,6 @@ double pmRigidTapTarget(PmRigidTap * const tap, double uu_per_rev)
     return target;
 }
 
-/** Returns true if segment has ONLY rotary motion, false otherwise. */
-int tcPureRotaryCheck(TC_STRUCT const * const tc)
-{
-    return (tc->motion_type == TC_LINEAR) &&
-        (tc->coords.line.xyz.tmag_zero) &&
-        (tc->coords.line.uvw.tmag_zero);
-}
-
-
 /**
  * Given a PmCircle and a circular segment, copy the circle in as the XYZ portion of the segment, then update the motion parameters.
  * NOTE: does not yet support ABC or UVW motion!
@@ -1087,7 +1110,7 @@ void tcCleanupRuckig(TC_STRUCT * const tc)
     }
 
     if (tc->ruckig_planner) {
-        ruckig_destroy(tc->ruckig_planner);
+        ruckig_pool_release(tc->ruckig_planner);
         tc->ruckig_planner = NULL;
     }
     tc->ruckig_planned = 0;
